@@ -28,14 +28,20 @@ def ensure_std_streams():
     真的没有（用户直接双击）就丢到 devnull。
     """
     for name, fd in (("stdout", 1), ("stderr", 2)):
-        if getattr(sys, name, None) is not None:
+        stream = getattr(sys, name, None)
+        if stream is None:
+            try:
+                stream = io.open(fd, "w", encoding="utf-8", errors="replace",
+                                 closefd=False)
+            except OSError:
+                stream = open(os.devnull, "w", encoding="utf-8")
+            setattr(sys, name, stream)
             continue
+        # 控制台可能是 cp1252/GBK：编不出来的字符替换掉，别让 print 崩掉整个程序
         try:
-            stream = io.open(fd, "w", encoding="utf-8", errors="replace",
-                             closefd=False)
-        except OSError:
-            stream = open(os.devnull, "w", encoding="utf-8")
-        setattr(sys, name, stream)
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
 
 
 def resolve_command(argv):
@@ -119,11 +125,15 @@ def run_selftest(args=None):
 
     lines.append("自检结果: " + ("通过" if ok else "失败"))
     text = "\n".join(lines)
+    # 先落盘再打印：日志文件是权威结果，控制台编码问题不该影响自检结论。
     try:
         (app_paths.base_dir() / "selftest.log").write_text(text, encoding="utf-8")
-    except OSError as exc:
-        print(f"写入 selftest.log 失败: {exc}")
-    print(text, flush=True)
+    except OSError:
+        pass
+    try:
+        print(text, flush=True)
+    except Exception:
+        pass
     return 0 if ok else 1
 
 

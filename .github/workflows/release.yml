@@ -37,13 +37,18 @@ jobs:
 
       - name: 冒烟自检（cv2 / OCR 是否真的能跑）
         run: |
-          .\dist\AssaultLilyBot\AssaultLilyBot.exe --selftest
-          Get-Content .\dist\AssaultLilyBot\selftest.log
+          # GUI 程序不接管道时 PowerShell 不会等它跑完，所以这里统一走管道取输出
+          $out = & .\dist\AssaultLilyBot\AssaultLilyBot.exe --selftest 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "自检失败，退出码 $LASTEXITCODE" }
+          Get-Content .\dist\AssaultLilyBot\selftest.log -Encoding utf8
         shell: pwsh
 
       - name: 配置检查（校验打包版能正常读配置）
         run: |
-          .\dist\AssaultLilyBot\AssaultLilyBot.exe --run-main config.json --check
+          $out = & .\dist\AssaultLilyBot\AssaultLilyBot.exe --run-main config.json --check 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "配置检查失败，退出码 $LASTEXITCODE" }
         shell: pwsh
 
       - name: 传 Release（打 tag 时）
