@@ -1,0 +1,56 @@
+name: build-release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-build.txt
+
+      - name: 单元测试
+        run: python -m unittest discover -s tests -t .
+
+      - name: 打包（绿色版 zip）
+        run: python package.py
+
+      - name: 冒烟自检（cv2 / OCR 是否真的能跑）
+        run: |
+          .\dist\AssaultLilyBot\AssaultLilyBot.exe --selftest
+          Get-Content .\dist\AssaultLilyBot\selftest.log
+        shell: pwsh
+
+      - name: 配置检查（校验打包版能正常读配置）
+        run: |
+          .\dist\AssaultLilyBot\AssaultLilyBot.exe --run-main config.json --check
+        shell: pwsh
+
+      - name: 传 Release（打 tag 时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+
+      - name: 传构建产物（手动触发时）
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: AssaultLilyBot-windows
+          path: dist/*.zip

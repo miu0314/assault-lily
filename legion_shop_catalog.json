@@ -1,0 +1,60 @@
+{
+  "updated_at": "2026-09-30T10:09:16",
+  "currency": "レギオンメダル",
+  "items": [
+    {
+      "name": "コイン",
+      "aliases": [],
+      "price": 10000,
+      "max": 1,
+      "ocr": ""
+    },
+    {
+      "name": "SKIP TICKET",
+      "aliases": [
+        "SKIP",
+        "TICKET",
+        "スキップチケット"
+      ],
+      "price": 1,
+      "max": 9,
+      "ocr": "SKIP"
+    },
+    {
+      "name": "戦術盤I",
+      "aliases": [
+        "術盤I",
+        "載術盤I",
+        "戦術盤I",
+        "战术盤I"
+      ],
+      "price": 911,
+      "max": 15,
+      "ocr": "载術盤I"
+    },
+    {
+      "name": "戦術盤II",
+      "aliases": [
+        "術盤II",
+        "載術盤II",
+        "戦術盤II",
+        "战术盤II"
+      ],
+      "price": 2,
+      "max": 8,
+      "ocr": "術盤II"
+    },
+    {
+      "name": "戦術盤III",
+      "aliases": [
+        "術盤III",
+        "載術盤III",
+        "戦術盤III",
+        "战术盤III"
+      ],
+      "price": 5,
+      "max": 3,
+      "ocr": "载術盤I川"
+    }
+  ]
+}
