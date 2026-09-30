@@ -20,6 +20,22 @@ import sys
 import zipfile
 from pathlib import Path
 
+def _setup_console():
+    """把中文输出兜住。
+
+    Windows 控制台编码可能是 GBK，英文系统的构建机则是 cp1252——直接 print
+    中文会抛 UnicodeEncodeError 把打包脚本搞挂。这里保留原编码，只把编不出来
+    的字符替换掉，保证不崩。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
+
+_setup_console()
+
 BASE_DIR = Path(__file__).resolve().parent
 DIST_DIR = BASE_DIR / "dist"
 BUILD_DIR = BASE_DIR / "build"

@@ -12,6 +12,10 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      # 构建机控制台不是中文编码，强制 UTF-8，免得 print 中文时炸掉
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     steps:
       - uses: actions/checkout@v4
 
