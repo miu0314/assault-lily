@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 from pathlib import Path
@@ -55,10 +56,12 @@ if (_TK_RUNTIME / "tcl" / "tcl8.6" / "init.tcl").exists():
     os.environ.setdefault("TK_LIBRARY", "tcl/tk8.6")
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 # 聊天定型文表（和 tasks/chat.py 共用一份，避免两边对不上）
 from tasks.chat_phrases import all_phrases as _chat_phrases  # noqa: E402
+
+import updater  # noqa: E402
 CONFIG_DEFAULT = BASE_DIR / "config.json"
 CONFIG_SELECTED = BASE_DIR / "config_selected.json"
 CATALOG_PATH = BASE_DIR / "legion_shop_catalog.json"
@@ -275,11 +278,13 @@ class LauncherApp(tk.Tk):
         self.flows_data = {"active": "", "flows": {}}
         self.flow_dirty = False
         self._refresh_mode = False
+        self._update_info = None
 
         self._build_ui()
         self._load_config_values()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll_queue)
+        self.after(4000, self._auto_check_update)
 
     # ---------- 界面 ----------
     def _build_ui(self):
@@ -501,6 +506,9 @@ class LauncherApp(tk.Tk):
         self.pause_btn = ttk.Button(btn_row, text="⏸ 暂停",
                                     command=self._toggle_pause, state="disabled")
         self.pause_btn.pack(side="left", padx=4)
+        self.update_btn = ttk.Button(btn_row, text="检查更新",
+                                     command=self._check_update)
+        self.update_btn.pack(side="right", padx=8)
         self.summary_lbl = ttk.Label(btn_row, text="", foreground="#555555")
         self.summary_lbl.pack(side="left", padx=(14, 4))
         self.status_var = tk.StringVar(value="未运行")
@@ -1011,12 +1019,122 @@ class LauncherApp(tk.Tk):
         code = self.proc.wait()
         self.msg_queue.put(("done", code))
 
+    # ---------- 更新 ----------
+    def _auto_check_update(self):
+        """启动后静默查一次：连不上或者已是最新就不吭声。"""
+        if app_paths.is_frozen():
+            self._check_update(silent=True)
+
+    def _check_update(self, silent=False):
+        if not app_paths.is_frozen():
+            self._append_log("源码模式请用 git pull 更新；内置更新只在打包版可用。\n")
+            return
+        if self.proc is not None and self.proc.poll() is None:
+            if not silent:
+                self._append_log("有任务正在运行，先停止再检查更新。\n")
+            return
+        self.update_btn.configure(state="disabled", text="检查中...")
+        threading.Thread(target=self._check_update_worker, args=(silent,),
+                         daemon=True).start()
+
+    def _check_update_worker(self, silent):
+        release, kind, message = updater.check(app_paths.__version__,
+                                               app_paths.base_dir(),
+                                               force=not silent)
+        self.msg_queue.put(("update", {"release": release, "kind": kind,
+                                       "message": message, "silent": silent}))
+
+    def _show_update_result(self, payload):
+        self.update_btn.configure(state="normal", text="检查更新")
+        release, kind = payload["release"], payload["kind"]
+        message, silent = payload["message"], payload["silent"]
+        if kind is None:
+            if not silent:
+                self._append_log(message + "\n")
+            return
+        self._append_log("\n" + message + "\n")
+        if kind == "program":
+            if release.full is None:
+                self._append_log("这个 Release 里没有完整包，请到网页手动下载。\n")
+                return
+            size = release.full.size / 1024 / 1024
+            if not messagebox.askyesno(
+                    "发现新版本",
+                    f"{message}\n\n完整包 {size:.0f} MB，需要重启程序完成更新。\n"
+                    "现在下载并更新吗？"):
+                return
+            self._start_download(release.full, "program")
+        else:
+            if release.assets is None:
+                self._append_log("这个 Release 里没有资源包。\n")
+                return
+            size = release.assets.size / 1024 / 1024
+            if not messagebox.askyesno(
+                    "识别模板有更新",
+                    f"{message}\n\n资源包 {size:.1f} MB，不用重启。\n现在更新吗？"):
+                return
+            self._start_download(release.assets, "assets")
+
+    def _start_download(self, asset, mode):
+        self._append_log(f"开始下载 {asset.name} ...\n")
+        threading.Thread(target=self._download_worker, args=(asset, mode),
+                         daemon=True).start()
+
+    def _download_worker(self, asset, mode):
+        dest = Path(tempfile.gettempdir()) / asset.name
+        state = {"last": -10}
+
+        def on_progress(done, total):
+            percent = int(done * 100 / total) if total else 0
+            if percent >= state["last"] + 10:
+                state["last"] = percent
+                self.msg_queue.put(("update_log", f"  已下载 {percent}%"))
+
+        try:
+            updater.download(asset.url, dest, on_progress=on_progress)
+        except updater.UpdateError as exc:
+            self.msg_queue.put(("update_log", f"下载失败：{exc}"))
+            self.msg_queue.put(("update", {"release": None, "kind": None,
+                                           "message": "", "silent": True}))
+            return
+        self.msg_queue.put(("update_ready", {"path": str(dest), "mode": mode}))
+
+    def _finish_update(self, payload):
+        path, mode = Path(payload["path"]), payload["mode"]
+        if mode == "assets":
+            try:
+                count = updater.apply_assets_pack(path, app_paths.base_dir())
+            except Exception as exc:  # noqa: BLE001 - 失败原因要让用户看到
+                self._append_log(f"模板更新失败：{exc}\n")
+                return
+            self._append_log(f"识别模板已更新（{count} 个文件），不用重启。\n")
+            return
+        if not messagebox.askyesno(
+                "更新已下载",
+                "程序会关闭、覆盖文件，然后自动重新打开。\n现在重启并完成更新吗？"):
+            self._append_log(f"已下载到 {path}，下次可以手动解压覆盖。\n")
+            return
+        try:
+            updater.apply_full_update(path, app_paths.base_dir(),
+                                      Path(sys.executable),
+                                      app_paths.base_dir() / "update.log")
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"启动更新脚本失败：{exc}\n")
+            return
+        self._append_log("正在关闭程序以完成更新，稍后会自动重新打开...\n")
+        self.after(600, self.destroy)
     def _poll_queue(self):
         try:
             while True:
                 kind, payload = self.msg_queue.get_nowait()
                 if kind == "log":
                     self._append_log(payload + "\n")
+                elif kind == "update":
+                    self._show_update_result(payload)
+                elif kind == "update_log":
+                    self._append_log(payload + "\n")
+                elif kind == "update_ready":
+                    self._finish_update(payload)
                 else:
                     self._append_log(f"\n运行结束，退出码 {payload}\n")
                     self.proc = None
@@ -1033,6 +1151,7 @@ class LauncherApp(tk.Tk):
         except queue.Empty:
             pass
         self.after(100, self._poll_queue)
+        self.after(4000, self._auto_check_update)
 
     def _append_log(self, text):
         self.log_text.configure(state="normal")

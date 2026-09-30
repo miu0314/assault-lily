@@ -26,3 +26,6 @@ config_selected.json
 # 本地开发笔记（含本机路径，不公开）
 HANDOFF.md
 NOTES.md
+assets_version.txt
+update.log
+update_cache.json

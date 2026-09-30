@@ -21,6 +21,8 @@
 - 升级时只覆盖 `AssaultLilyBot.exe` 和 `_internal`，自己的 `config.json` 不会被覆盖。
 - 双击没反应？看同目录的 `launcher_error.log`；想确认环境正常可执行
   `AssaultLilyBot.exe --selftest`，结果写在 `selftest.log`。
+- 启动器会自动检查新版本：程序更新走完整包（自动重启覆盖，你的 config 不会被动），
+  识别模板更新走 1~2MB 的小包，不用重启。
 
 ## 使用方法（源码运行）
 

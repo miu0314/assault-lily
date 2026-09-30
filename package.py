@@ -45,6 +45,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from app_paths import __version__  # noqa: E402
+from updater import STAMP_FILE, pack_stamp  # noqa: E402
 
 USAGE_TEXT = """突击莉莉脚本 v{version}（Windows 绿色版）
 ========================================
@@ -97,13 +98,30 @@ def build():
 
 
 def stage(app_dir):
-    """把 exe 外面必须随包一起给的文件放进去。"""
+    """把 exe 外面必须随包一起给的文件放进去，并记录资源版本号。"""
     shutil.copytree(BASE_DIR / "assets", app_dir / "assets", dirs_exist_ok=True)
     for name in ("legion_shop_catalog.json", "README.md"):
         shutil.copy2(BASE_DIR / name, app_dir / name)
     shutil.copy2(BASE_DIR / "config.example.json", app_dir / "config.json")
     (app_dir / "使用说明.txt").write_text(
         USAGE_TEXT.format(version=__version__), encoding="utf-8")
+    # 资源版本号 = assets 目录内容指纹：模板变了才变，更新器靠它判断要不要下小包
+    stamp = pack_stamp(app_dir / "assets")
+    (app_dir / STAMP_FILE).write_text(stamp + "\n", encoding="utf-8")
+    return stamp
+
+
+def make_assets_pack(app_dir, stamp):
+    """只含 assets/ 与资源版本号的小包（1~2MB），用于不重启的模板更新。"""
+    pack_path = DIST_DIR / f"{APP_NAME}-assets-{stamp}.zip"
+    if pack_path.exists():
+        pack_path.unlink()
+    with zipfile.ZipFile(pack_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for path in sorted((app_dir / "assets").rglob("*")):
+            if path.is_file():
+                zf.write(path, path.relative_to(app_dir))
+        zf.write(app_dir / STAMP_FILE, STAMP_FILE)
+    return pack_path
 
 
 def make_zip(app_dir):
@@ -131,11 +149,13 @@ def main():
     if not exe_path.exists():
         print(f"打包失败：找不到 {exe_path}")
         return 1
-    stage(app_dir)
+    stamp = stage(app_dir)
     zip_path = make_zip(app_dir)
+    pack_path = make_assets_pack(app_dir, stamp)
     print("")
     print(f"文件夹：{app_dir}（{folder_size(app_dir)}）")
-    print(f"压缩包：{zip_path}（{zip_path.stat().st_size / 1024 / 1024:.1f} MB）")
+    print(f"完整包：{zip_path}（{zip_path.stat().st_size / 1024 / 1024:.1f} MB）")
+    print(f"资源包：{pack_path}（{pack_path.stat().st_size / 1024 / 1024:.1f} MB，版本 {stamp}）")
     return 0
 
 

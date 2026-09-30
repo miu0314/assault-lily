@@ -17,6 +17,7 @@ FLAGS = {
     "--run-main": "main",
     "--scan-shop": "scan_shop",
     "--selftest": "selftest",
+    "--check-update": "check_update",
 }
 
 
@@ -162,6 +163,31 @@ def run_selftest(args=None):
     return 0 if ok else 1
 
 
+def run_check_update(args=None):
+    """命令行查一次更新（打包版排查用，也方便脚本调用）。"""
+    import urllib.request
+
+    import app_paths
+    import updater
+
+    print(f"程序目录: {app_paths.base_dir()}", flush=True)
+    try:
+        print(f"系统代理: {urllib.request.getproxies()}", flush=True)
+    except Exception as exc:  # noqa: BLE001 - 只用于排查
+        print(f"系统代理: 读取失败 {exc!r}", flush=True)
+    print("正在查询 GitHub ...", flush=True)
+    release, kind, message = updater.check(app_paths.__version__,
+                                           app_paths.base_dir())
+    print(f"当前版本: v{app_paths.__version__}")
+    print(f"最新版本: {release.tag if release else '（查询失败）'}")
+    print(f"结论: {message}")
+    if kind == "program" and release and release.full:
+        print(f"完整包: {release.full.name}（{release.full.size / 1024 / 1024:.0f} MB）")
+    if release and release.assets:
+        print(f"资源包: {release.assets.name}（{release.assets.size / 1024 / 1024:.1f} MB）")
+    return 0
+
+
 def main(argv=None):
     ensure_std_streams()
     argv = list(sys.argv if argv is None else argv)
@@ -172,6 +198,8 @@ def main(argv=None):
         return run_scan_shop(args)
     if action == "selftest":
         return run_selftest(args)
+    if action == "check_update":
+        return run_check_update(args)
 
     import launcher
 

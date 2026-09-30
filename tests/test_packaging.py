@@ -67,6 +67,9 @@ class PackagingEntryTest(unittest.TestCase):
             ("scan_shop", ["config.json"]))
         self.assertEqual(packaging_entry.resolve_command(["app.exe", "--selftest"]),
                          ("selftest", []))
+        self.assertEqual(
+            packaging_entry.resolve_command(["app.exe", "--check-update"]),
+            ("check_update", []))
 
 
 class RelativePathTest(unittest.TestCase):
