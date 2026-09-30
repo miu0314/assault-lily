@@ -18,6 +18,7 @@ FLAGS = {
     "--scan-shop": "scan_shop",
     "--selftest": "selftest",
     "--check-update": "check_update",
+    "--update": "update",
 }
 
 
@@ -163,6 +164,55 @@ def run_selftest(args=None):
     return 0 if ok else 1
 
 
+def run_update(args=None):
+    """命令行一键更新：检查 → 下载 → 应用（程序更新会重启自己）。
+
+    给「不想开界面」和自动化验证用；GUI 里点按钮走的是同一套函数。
+    """
+    import tempfile
+    from pathlib import Path
+
+    import app_paths
+    import updater
+
+    release, kind, message = updater.check(app_paths.__version__,
+                                           app_paths.base_dir(), force=True)
+    print(f"当前版本: v{app_paths.__version__}", flush=True)
+    if release:
+        print(f"最新版本: {release.tag}", flush=True)
+    print(f"结论: {message}", flush=True)
+    if kind is None:
+        return 0
+
+    asset = release.full if kind == "program" else release.assets
+    if asset is None:
+        print("这个 Release 里没有对应的包，请到网页手动下载。", flush=True)
+        return 1
+
+    dest = Path(tempfile.gettempdir()) / asset.name
+    state = {"last": -10}
+
+    def on_progress(done, total):
+        percent = int(done * 100 / total) if total else 0
+        if percent >= state["last"] + 10:
+            state["last"] = percent
+            print(f"  已下载 {percent}%", flush=True)
+
+    print(f"开始下载 {asset.name}（{asset.size / 1024 / 1024:.1f} MB）...", flush=True)
+    updater.download(asset.url, dest, on_progress=on_progress)
+
+    if kind == "assets":
+        count = updater.apply_assets_pack(dest, app_paths.base_dir())
+        print(f"识别模板已更新（{count} 个文件），不用重启。", flush=True)
+        return 0
+
+    updater.apply_full_update(dest, app_paths.base_dir(),
+                              Path(sys.executable),
+                              app_paths.base_dir() / "update.log")
+    print("已启动更新脚本，本进程马上退出以完成覆盖 ...", flush=True)
+    return 0
+
+
 def run_check_update(args=None):
     """命令行查一次更新（打包版排查用，也方便脚本调用）。"""
     import urllib.request
@@ -200,6 +250,8 @@ def main(argv=None):
         return run_selftest(args)
     if action == "check_update":
         return run_check_update(args)
+    if action == "update":
+        return run_update(args)
 
     import launcher
 

@@ -39,6 +39,30 @@ STAMP_FILE = "assets_version.txt"
 KEEP_FILES = ("config.json", "config_selected.json")
 
 
+class UpdateGuard:
+    """一次只允许一个更新动作（检查 / 下载），防止重复点击叠出多个弹窗。
+
+    实测 2026-09-30：弹窗弹出时按钮又被设回可点，Tk 弹窗会跑嵌套事件循环，
+    再点一下就会再起一次检查 → 又叠一层弹窗，点「否」只关掉最里面那层。
+    """
+
+    def __init__(self):
+        self.state = "idle"
+
+    @property
+    def busy(self):
+        return self.state != "idle"
+
+    def try_begin(self, state):
+        if self.busy:
+            return False
+        self.state = state
+        return True
+
+    def finish(self):
+        self.state = "idle"
+
+
 class UpdateError(Exception):
     """查更新 / 下载失败。"""
 
@@ -200,10 +224,12 @@ def download(url, dest, on_progress=None, timeout=60):
     """下载到 dest；on_progress(已下载, 总大小) 用于显示进度。"""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # 先写 .part 再改名：中途断线不会留下半个包被当成完整更新包去覆盖程序
+    part = dest.with_name(dest.name + ".part")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response, \
-                open(dest, "wb") as handle:
+                open(part, "wb") as handle:
             total = int(response.headers.get("Content-Length") or 0)
             done = 0
             while True:
@@ -215,7 +241,12 @@ def download(url, dest, on_progress=None, timeout=60):
                 if on_progress:
                     on_progress(done, total)
     except (urllib.error.URLError, OSError) as exc:
+        try:
+            part.unlink()
+        except OSError:
+            pass
         raise UpdateError(f"下载失败：{exc}") from exc
+    os.replace(part, dest)
     return dest
 
 

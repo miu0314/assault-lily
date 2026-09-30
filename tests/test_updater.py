@@ -169,3 +169,42 @@ class StampTest(unittest.TestCase):
             (Path(a) / "note.txt").write_bytes(b"same")
             (Path(b) / "note.txt").write_bytes(b"different")
             self.assertNotEqual(u.pack_stamp(Path(a)), u.pack_stamp(Path(b)))
+
+class DownloadTest(unittest.TestCase):
+    def test_download_writes_file_via_part(self):
+        """下载先写 .part 再改名，中途失败不会留下半个包被当成完整的更新包。"""
+        import updater as u
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "src.bin"
+            source.write_bytes(b"x" * 5000)
+            dest = base / "out" / "pkg.zip"
+            seen = []
+
+            def on_progress(done, total):
+                # 下载过程中目标文件必须还没出现（说明是写 .part 再改名）
+                seen.append((done, total, dest.exists()))
+
+            u.download(source.as_uri(), dest, on_progress=on_progress)
+            self.assertEqual(dest.read_bytes(), b"x" * 5000)
+            self.assertFalse(dest.with_name(dest.name + ".part").exists())
+            self.assertTrue(seen)
+            self.assertEqual(seen[-1][0], 5000)
+            self.assertFalse(any(existed for _d, _t, existed in seen))
+
+
+class UpdateGuardTest(unittest.TestCase):
+    """防止「下载中又被点一次」这类重复触发（实机截图里重复了 8 次）。"""
+
+    def test_blocks_until_finished(self):
+        import updater as u
+
+        guard = u.UpdateGuard()
+        self.assertTrue(guard.try_begin("checking"))
+        self.assertFalse(guard.try_begin("downloading"))   # 检查中不能再开
+        guard.finish()
+        self.assertTrue(guard.try_begin("downloading"))
+        self.assertFalse(guard.try_begin("checking"))      # 下载中不能再查
+        guard.finish()
+        self.assertFalse(guard.busy)

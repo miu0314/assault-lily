@@ -279,6 +279,7 @@ class LauncherApp(tk.Tk):
         self.flow_dirty = False
         self._refresh_mode = False
         self._update_info = None
+        self._update_guard = updater.UpdateGuard()
 
         self._build_ui()
         self._load_config_values()
@@ -1033,6 +1034,11 @@ class LauncherApp(tk.Tk):
             if not silent:
                 self._append_log("有任务正在运行，先停止再检查更新。\n")
             return
+        # 互斥：检查/下载进行中就不再受理，避免嵌套弹窗（实测会弹到关不掉）
+        if not self._update_guard.try_begin("checking"):
+            if not silent:
+                self._append_log("更新流程正在进行中，请稍候。\n")
+            return
         self.update_btn.configure(state="disabled", text="检查中...")
         threading.Thread(target=self._check_update_worker, args=(silent,),
                          daemon=True).start()
@@ -1044,13 +1050,21 @@ class LauncherApp(tk.Tk):
         self.msg_queue.put(("update", {"release": release, "kind": kind,
                                        "message": message, "silent": silent}))
 
-    def _show_update_result(self, payload):
+    def _reset_update_ui(self):
+        self._update_guard.finish()
         self.update_btn.configure(state="normal", text="检查更新")
+
+    def _show_update_result(self, payload):
         release, kind = payload["release"], payload["kind"]
         message, silent = payload["message"], payload["silent"]
         if kind is None:
+            self._reset_update_ui()
             if not silent:
                 self._append_log(message + "\n")
+            return
+        if self._update_guard.state != "checking":
+            # 重复的更新提示（连点按钮 / 迟到的消息）：直接丢弃，绝不再叠一层弹窗
+            self._append_log("已忽略重复的更新提示。\n")
             return
         self._append_log("\n" + message + "\n")
         if kind == "program":
@@ -1062,6 +1076,7 @@ class LauncherApp(tk.Tk):
                     "发现新版本",
                     f"{message}\n\n完整包 {size:.0f} MB，需要重启程序完成更新。\n"
                     "现在下载并更新吗？"):
+                self._reset_update_ui()
                 return
             self._start_download(release.full, "program")
         else:
@@ -1072,11 +1087,15 @@ class LauncherApp(tk.Tk):
             if not messagebox.askyesno(
                     "识别模板有更新",
                     f"{message}\n\n资源包 {size:.1f} MB，不用重启。\n现在更新吗？"):
+                self._reset_update_ui()
                 return
             self._start_download(release.assets, "assets")
 
     def _start_download(self, asset, mode):
-        self._append_log(f"开始下载 {asset.name} ...\n")
+        self._update_guard.state = "downloading"
+        self.update_btn.configure(state="disabled", text="下载中...")
+        size = asset.size / 1024 / 1024
+        self._append_log(f"开始下载 {asset.name}（{size:.1f} MB）...\n")
         threading.Thread(target=self._download_worker, args=(asset, mode),
                          daemon=True).start()
 
@@ -1086,16 +1105,18 @@ class LauncherApp(tk.Tk):
 
         def on_progress(done, total):
             percent = int(done * 100 / total) if total else 0
-            if percent >= state["last"] + 10:
+            if percent >= state["last"] + 5:
                 state["last"] = percent
-                self.msg_queue.put(("update_log", f"  已下载 {percent}%"))
+                self.msg_queue.put(
+                    ("update_log",
+                     f"  已下载 {percent}%（{done / 1024 / 1024:.1f}/"
+                     f"{total / 1024 / 1024:.1f} MB）"))
 
         try:
             updater.download(asset.url, dest, on_progress=on_progress)
         except updater.UpdateError as exc:
             self.msg_queue.put(("update_log", f"下载失败：{exc}"))
-            self.msg_queue.put(("update", {"release": None, "kind": None,
-                                           "message": "", "silent": True}))
+            self.msg_queue.put(("update_failed", None))
             return
         self.msg_queue.put(("update_ready", {"path": str(dest), "mode": mode}))
 
@@ -1106,13 +1127,16 @@ class LauncherApp(tk.Tk):
                 count = updater.apply_assets_pack(path, app_paths.base_dir())
             except Exception as exc:  # noqa: BLE001 - 失败原因要让用户看到
                 self._append_log(f"模板更新失败：{exc}\n")
+                self._reset_update_ui()
                 return
             self._append_log(f"识别模板已更新（{count} 个文件），不用重启。\n")
+            self._reset_update_ui()
             return
         if not messagebox.askyesno(
                 "更新已下载",
                 "程序会关闭、覆盖文件，然后自动重新打开。\n现在重启并完成更新吗？"):
             self._append_log(f"已下载到 {path}，下次可以手动解压覆盖。\n")
+            self._reset_update_ui()
             return
         try:
             updater.apply_full_update(path, app_paths.base_dir(),
@@ -1120,6 +1144,7 @@ class LauncherApp(tk.Tk):
                                       app_paths.base_dir() / "update.log")
         except Exception as exc:  # noqa: BLE001
             self._append_log(f"启动更新脚本失败：{exc}\n")
+            self._reset_update_ui()
             return
         self._append_log("正在关闭程序以完成更新，稍后会自动重新打开...\n")
         self.after(600, self.destroy)
@@ -1135,6 +1160,8 @@ class LauncherApp(tk.Tk):
                     self._append_log(payload + "\n")
                 elif kind == "update_ready":
                     self._finish_update(payload)
+                elif kind == "update_failed":
+                    self._reset_update_ui()
                 else:
                     self._append_log(f"\n运行结束，退出码 {payload}\n")
                     self.proc = None
