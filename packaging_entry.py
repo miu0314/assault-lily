@@ -54,17 +54,42 @@ def resolve_command(argv):
     return "launcher", args
 
 
+def resolve_relative_path(value, base):
+    """相对路径按「程序目录」解析。
+
+    打包版可能从任意工作目录启动（快捷方式、别的盘符），按 cwd 找 config.json
+    会直接报「配置文件不存在」，所以相对路径统一以 exe 所在目录为基准。
+    """
+    from pathlib import Path
+
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    candidate = Path(base) / path
+    return str(candidate) if candidate.exists() else value
+
+
+def fix_argv(args):
+    """把第一个参数（配置文件路径）里的相对路径补成绝对路径。"""
+    import app_paths
+
+    args = list(args)
+    if args and not args[0].startswith("-"):
+        args[0] = resolve_relative_path(args[0], app_paths.base_dir())
+    return args
+
+
 def run_main(args):
     import main as main_module
 
-    sys.argv = [sys.argv[0]] + list(args)
+    sys.argv = [sys.argv[0]] + fix_argv(args)
     return main_module.main()
 
 
 def run_scan_shop(args):
     from scripts import scan_legion_shop
 
-    sys.argv = [sys.argv[0]] + list(args)
+    sys.argv = [sys.argv[0]] + fix_argv(args)
     return scan_legion_shop.main()
 
 

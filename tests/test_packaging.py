@@ -69,5 +69,36 @@ class PackagingEntryTest(unittest.TestCase):
                          ("selftest", []))
 
 
+class RelativePathTest(unittest.TestCase):
+    def test_relative_path_resolves_against_app_dir(self):
+        import tempfile
+        import packaging_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "config.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(packaging_entry.resolve_relative_path("config.json", base),
+                             str(base / "config.json"))
+
+    def test_missing_and_absolute_paths_kept(self):
+        import tempfile
+        import packaging_entry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self.assertEqual(packaging_entry.resolve_relative_path("nope.json", base),
+                             "nope.json")
+            absolute = str(base / "config.json")
+            self.assertEqual(packaging_entry.resolve_relative_path(absolute, base),
+                             absolute)
+
+
+class FixArgvTest(unittest.TestCase):
+    def test_flag_only_argv_untouched(self):
+        import packaging_entry
+
+        self.assertEqual(packaging_entry.fix_argv(["--check"]), ["--check"])
+        self.assertEqual(packaging_entry.fix_argv([]), [])
+
 if __name__ == "__main__":
     unittest.main()
