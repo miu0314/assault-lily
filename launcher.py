@@ -280,6 +280,7 @@ class LauncherApp(tk.Tk):
         self._refresh_mode = False
         self._update_info = None
         self._update_guard = updater.UpdateGuard()
+        self._auto_checked = False
 
         self._build_ui()
         self._load_config_values()
@@ -1022,7 +1023,14 @@ class LauncherApp(tk.Tk):
 
     # ---------- 更新 ----------
     def _auto_check_update(self):
-        """启动后静默查一次：连不上或者已是最新就不吭声。"""
+        """启动后静默查一次：连不上或者已是最新就不吭声。
+
+        只跑一次（`_auto_checked`）。曾经因为定时器被重复排程，这里每 4 秒
+        触发一次检查，按钮就在「检查更新 / 检查中...」之间狂闪，还会不停弹窗。
+        """
+        if self._auto_checked:
+            return
+        self._auto_checked = True
         if app_paths.is_frozen():
             self._check_update(silent=True)
 
@@ -1178,7 +1186,6 @@ class LauncherApp(tk.Tk):
         except queue.Empty:
             pass
         self.after(100, self._poll_queue)
-        self.after(4000, self._auto_check_update)
 
     def _append_log(self, text):
         self.log_text.configure(state="normal")

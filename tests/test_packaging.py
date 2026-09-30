@@ -105,3 +105,35 @@ class FixArgvTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class LauncherAutoCheckTest(unittest.TestCase):
+    """回归：自动检查更新只能触发一次。
+
+    实测 2026-09-30：`after(4000, _auto_check_update)` 被误插进每 100ms 跑一次的
+    `_poll_queue`，于是每 4 秒就发起一次检查 —— 按钮在「检查更新 / 检查中...」之间
+    狂闪，还会不停弹更新窗（点「否」也关不完）。
+    """
+
+    def test_auto_check_scheduled_only_once_in_source(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "launcher.py").read_text(
+            encoding="utf-8")
+        self.assertEqual(
+            source.count("after(4000, self._auto_check_update)"), 1,
+            "自动检查更新的定时器只能排一次（曾因为多排导致按钮狂闪）")
+
+    def test_auto_check_runs_single_time(self):
+        import types
+
+        import launcher
+
+        calls = []
+        fake = types.SimpleNamespace(
+            _auto_checked=False,
+            _check_update=lambda silent=False: calls.append(silent))
+        with patch.object(launcher.app_paths, "is_frozen", return_value=True):
+            launcher.LauncherApp._auto_check_update(fake)
+            launcher.LauncherApp._auto_check_update(fake)
+            launcher.LauncherApp._auto_check_update(fake)
+        self.assertEqual(calls, [True])
