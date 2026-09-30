@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """打包相关逻辑测试：路径解析 / 子进程重启 / 打包入口分发。"""
 
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -137,3 +138,55 @@ class LauncherAutoCheckTest(unittest.TestCase):
             launcher.LauncherApp._auto_check_update(fake)
             launcher.LauncherApp._auto_check_update(fake)
         self.assertEqual(calls, [True])
+
+
+class SafeStreamTest(unittest.TestCase):
+    """终端/管道写不出去时要静音，不能把异常抛给调用方。"""
+
+    def test_swallows_write_errors(self):
+        class _Broken:
+            def write(self, data):
+                raise OSError(22, "Invalid argument")
+
+            def flush(self):
+                raise OSError(22, "Invalid argument")
+
+        stream = packaging_entry.SafeStream(_Broken())
+        self.assertEqual(stream.write("x"), 0)
+        stream.flush()                          # 不抛
+        self.assertEqual(stream.write("y"), 0)  # 之后一直静音
+
+    def test_passes_through_normal_writes(self):
+        buffer = io.StringIO()
+        stream = packaging_entry.SafeStream(buffer)
+        stream.write("ok\n")
+        stream.writelines(["a\n", "b\n"])
+        stream.flush()
+        self.assertEqual(buffer.getvalue(), "ok\na\nb\n")
+
+    def test_delegates_other_attributes(self):
+        buffer = io.StringIO()
+        stream = packaging_entry.SafeStream(buffer)
+        self.assertEqual(stream.encoding, buffer.encoding)
+
+
+class MainErrorGuardTest(unittest.TestCase):
+    """命令行入口崩溃：写 run_error.log + 返回 1，不弹模态框。"""
+
+    def test_cli_action_crash_is_logged_not_raised(self):
+        with patch.object(packaging_entry, "_dispatch",
+                          side_effect=RuntimeError("boom")), \
+                patch.object(packaging_entry, "_write_run_error") as wrote, \
+                patch("sys.stdout", new_callable=io.StringIO):
+            code = packaging_entry.main(["app.exe", "--run-main", "cfg.json"])
+        self.assertEqual(code, 1)
+        wrote.assert_called_once()
+        self.assertIn("boom", wrote.call_args.args[0])
+
+    def test_launcher_crash_still_raises(self):
+        """启动器路径保持原样（launcher.py 自己弹窗 + launcher_error.log）。"""
+        with patch.object(packaging_entry, "_dispatch",
+                          side_effect=RuntimeError("boom")), \
+                patch("sys.stdout", new_callable=io.StringIO):
+            with self.assertRaises(RuntimeError):
+                packaging_entry.main(["app.exe"])

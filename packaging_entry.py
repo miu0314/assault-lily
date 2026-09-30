@@ -22,6 +22,47 @@ FLAGS = {
 }
 
 
+class SafeStream:
+    """写不出去就静音的输出流代理（包在真实 stdout / stderr 外面）。
+
+    2026-09-30 实测：Codex 里用 `& AssaultLilyBot.exe --run-main ... | Tee-Object`
+    时 Tee 先失败，管道读端没了 → exe 里第一次 `print` 抛
+    `OSError: [Errno 22] Invalid argument` → 窗口版打包程序弹
+    「Unhandled exception in script」、任务当场中断。
+    日志/提示写不出去不该让程序崩，所以这里把写失败吞掉（之后一直静音）。
+    """
+
+    _DEAD_ERRORS = (OSError, ValueError)
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._broken = False
+
+    def write(self, data):
+        if self._broken:
+            return 0
+        try:
+            return self._stream.write(data)
+        except self._DEAD_ERRORS:
+            self._broken = True
+            return 0
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        if self._broken:
+            return
+        try:
+            self._stream.flush()
+        except self._DEAD_ERRORS:
+            self._broken = True
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def ensure_std_streams():
     """把 sys.stdout/stderr 接回真实句柄。
 
@@ -37,13 +78,14 @@ def ensure_std_streams():
                                  closefd=False)
             except OSError:
                 stream = open(os.devnull, "w", encoding="utf-8")
-            setattr(sys, name, stream)
+            setattr(sys, name, SafeStream(stream))
             continue
         # 控制台可能是 cp1252/GBK：编不出来的字符替换掉，别让 print 崩掉整个程序
         try:
             stream.reconfigure(errors="replace")
         except Exception:
             pass
+        setattr(sys, name, SafeStream(stream))
 
 
 def resolve_command(argv):
@@ -242,6 +284,27 @@ def main(argv=None):
     ensure_std_streams()
     argv = list(sys.argv if argv is None else argv)
     action, args = resolve_command(argv)
+    try:
+        return _dispatch(action, args)
+    except Exception:
+        if action == "launcher":
+            # 启动器自己有 sys.excepthook → launcher_error.log + 弹窗，保持原样
+            raise
+        # 命令行入口（--run-main 等）崩了不该弹模态框：记进 run_error.log 再退出，
+        # 子进程的退出码仍然是 1，启动器那边能看到「进程退出」。
+        import traceback
+
+        text = traceback.format_exc()
+        _write_run_error(text)
+        last = text.strip().splitlines()[-1] if text.strip() else "未知错误"
+        try:
+            print(f"运行失败：{last}（详见程序目录的 run_error.log）", flush=True)
+        except Exception:
+            pass
+        return 1
+
+
+def _dispatch(action, args):
     if action == "main":
         return run_main(args)
     if action == "scan_shop":
@@ -256,6 +319,21 @@ def main(argv=None):
     import launcher
 
     return launcher.main()
+
+
+def _write_run_error(text):
+    """把命令行入口的崩溃堆栈写到程序目录（写不了就算了，别再抛）。"""
+    try:
+        import time
+
+        import app_paths
+
+        path = app_paths.base_dir() / "run_error.log"
+        stamp = f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n"
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(stamp + text + "\n")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
