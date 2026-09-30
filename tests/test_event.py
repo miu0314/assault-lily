@@ -1708,5 +1708,44 @@ class ClearEventStagesOrderTest(unittest.TestCase):
         self.assertIn((858, 61), ctx.clicks)       # 叫出来后点 SKIP
 
 
+class BattleWaitTitleGuardTest(unittest.TestCase):
+    """2026-09-30 实测：活动战斗中途游戏自己重启回标题，等待循环白等 9 分钟。
+
+    标题画面背景一直在动，「画面是否静止」那条兜底判不出来；现在直接认标题收工。
+    """
+
+    def test_event_battle_gives_up_when_back_to_title(self):
+        import numpy as np
+
+        class _C:
+            def __init__(self):
+                self.logger = _Logger()
+                self._last_screen = np.zeros((720, 1280, 3), np.uint8)
+                self.saved = []
+                self.shots = 0
+
+            def screenshot(self, *a, **k):
+                self.shots += 1
+                return self._last_screen
+
+            def save_screenshot(self, img, name=None):
+                self.saved.append(name)
+                return f"screenshots/{name}"
+
+        ctx = _C()
+        task = ClearEventBattle()
+        with patch("tasks.event.time.sleep"), \
+                patch("tasks.event.handle_network_error", return_value=False), \
+                patch("tasks.event.handle_download_popup", return_value=False), \
+                patch("tasks.event.is_title_screen", return_value=True):
+            ok = task._battle_and_clear(ctx)
+
+        self.assertFalse(ok)
+        self.assertTrue(task.failed)
+        self.assertLessEqual(ctx.shots, 2)                 # 没有等到 540 秒上限
+        self.assertIn("event_battle_title_back.png", ctx.saved)
+        self.assertIn("标题画面", ctx.logger.joined())
+
+
 if __name__ == "__main__":
     unittest.main()

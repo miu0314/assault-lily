@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from tasks.quests import ClearLegionGekiha, battle_screen_still
+from tasks.quests import (ClearLegionGekiha, SweepRankUpStage,
+                          battle_screen_still)
 
 
 class _Logger:
@@ -37,6 +38,10 @@ class _Ctx:
         self.index += 1
         self.shots += 1
         return self._last_screen
+
+    def find(self, *a, **k):
+        """战斗画面里没有标题模板（`is_title_screen` 用）。"""
+        return None
 
     def save_screenshot(self, img, name=None):
         self.saved.append(name)
@@ -115,6 +120,52 @@ class WaitBattleResultTest(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(ctx.saved, [])                # 没有误判成卡住
+
+    def test_gives_up_at_once_when_back_to_title(self):
+        """战斗被游戏自身重启打断（回到标题画面）时要立刻收工。
+
+        实测 2026-09-30 日常流程：活动战斗打到一半遇通信失败 →「データダウンロード」
+        → 游戏自己重启回标题。标题画面背景一直在动，`battle_screen_still`
+        永远不成立，于是白等 9 分钟（21:01:14 → 21:10:34）才判超时。
+        """
+        ctx = _Ctx([_frame(150)] * 60)
+        task = self._task()
+
+        with patch("tasks.quests.time.sleep"), \
+                patch("tasks.quests.handle_download_popup", return_value=False), \
+                patch("tasks.quests.is_title_screen", return_value=True):
+            ok = task._wait_battle_result(ctx)
+
+        self.assertFalse(ok)
+        self.assertLessEqual(ctx.shots, 2)             # 第一轮就退出，没空等
+        self.assertIn("battle_title_back.png", ctx.saved)
+        self.assertIn("标题画面", ctx.logger.joined())
+
+
+class RankUpChargeDialogTest(unittest.TestCase):
+    """RANK UP 次数不足时点关卡行会弹「挑戦可能数チャージ確認」，要能认出来。
+
+    实测 2026-09-30（现场截图 screenshots/rk_tap3s.png）：弹窗文字被 OCR 读成
+    「挑可能数不足。」「挑可能数：0/20▸1/20」「于一可能数：00」——「戦」常丢，
+    所以只按「可能数 + 不足」两个词判定；点 OK 会花 50 宝石，必须取消。
+    """
+
+    def test_detects_charge_dialog(self):
+        ctx = _Ctx([_frame(235)])
+        toks = [("挑可能数于十一確", 188, 51, 0.93),
+                ("挑可能数不足。", 634, 240, 0.97),
+                ("挑可能数：0/20▸1/20", 738, 309, 0.96),
+                ("于一可能数：00", 1041, 309, 0.87)]
+        with patch("tasks.quests.read_text", return_value=toks):
+            self.assertTrue(SweepRankUpStage._stage_charge_dialog(ctx))
+
+    def test_ignores_normal_screens(self):
+        ctx = _Ctx([_frame(235)])
+        toks = [("ステージ情報", 640, 100, 0.95),
+                ("消費AP", 300, 300, 0.9),
+                ("OK", 758, 650, 0.98)]
+        with patch("tasks.quests.read_text", return_value=toks):
+            self.assertFalse(SweepRankUpStage._stage_charge_dialog(ctx))
 
 
 if __name__ == "__main__":

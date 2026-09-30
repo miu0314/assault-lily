@@ -4,7 +4,7 @@ from core.navigation import click_home_button
 from core.ocr import read_text
 from core.popups import (click_ok_by_ocr, close_content_popup,
                          handle_download_popup, handle_network_error)
-from core.pages import is_page
+from core.pages import is_page, is_title_screen
 from core.task import Task
 from tasks.navigation import GoHomeFirst
 
@@ -42,8 +42,7 @@ def is_loading(ctx, allow_ocr=True):
 
 def _title_screen(ctx):
     """标题画面：右上角「サポート」按钮（新版标题）或 TAP TO START（旧版）。"""
-    return (ctx.find("home/title_support.png", threshold=0.8) is not None
-            or ctx.find("home/tap_to_start.png", threshold=0.7) is not None)
+    return is_title_screen(ctx)
 
 
 def _handle_startup_popups(ctx, accel_action):

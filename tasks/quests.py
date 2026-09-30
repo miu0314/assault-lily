@@ -4,7 +4,7 @@ import re
 import cv2
 import numpy as np
 
-from core.pages import is_page
+from core.pages import is_page, is_title_screen
 from core.navigation import click_home_button, ensure_home
 from core.ocr import read_text, read_text_boxes
 from core.popups import (click_ok_by_ocr, close_content_popup,
@@ -319,7 +319,23 @@ class SweepRankUpStage(Task):
 
         # 4. 详情页点「ユニット選択」进入战斗准备
         if not self._wait_stage_info(ctx):
-            ctx.logger.warn("未进入关卡详情页，跳过")
+            # 2026-09-30 实测：没次数时点关卡行不进ステージ情報，而是弹
+            # 「挑戦可能数チャージ確認」（花宝石把 0/20 充成 1/20）。旧日志只写
+            # 「未进入关卡详情页」，看不出原因；而且那个弹窗的 OK 正好在
+            # `_find_popup_ok` 的判定区间里，绝不能让后续流程点到它。
+            if self._stage_charge_dialog(ctx):
+                joined = "".join(t for t, *_ in read_text(ctx._last_screen))
+                m = re.search(r"(\d+)\s*/\s*(\d+)", joined)
+                left = f"{m.group(1)}/{m.group(2)}" if m else "0"
+                ctx.logger.warn(
+                    f"RANK UP 挑戦可能数不足（{left}），已取消「チャージ確認」并跳过")
+                ctx.device.key("BACK")      # 等同于弹窗的「キャンセル」，不花宝石
+                time.sleep(2)
+            elif self._on_stage_selection(ctx):
+                ctx.logger.warn(
+                    f"RANK UP「{difficulty}」关卡点了没反应（可能未解锁），跳过")
+            else:
+                ctx.logger.warn("未进入关卡详情页，跳过")
             self._back_home(ctx)
             return self.skip("RANK UP 扫荡：未进入关卡详情页，跳过", ctx)
         ctx.click(1176, 621, sleeptime=6)
@@ -370,15 +386,35 @@ class SweepRankUpStage(Task):
     def _wait_stage_selection(self, ctx):
         """等待进入 RANK UP 的ステージ選択页。"""
         for _ in range(10):
-            ctx.screenshot()
-            for text, _cx, _cy, _score in read_text(ctx._last_screen):
-                t = text.upper().replace("级", "級")
-                if "NO REWARD" in t:
-                    return True
-                if "RANK" in t and any(k in t for k in ("初級", "中級", "上級", "EX")):
-                    return True
+            if self._on_stage_selection(ctx):
+                return True
             time.sleep(2)
         return False
+
+    @staticmethod
+    def _on_stage_selection(ctx):
+        """当前画面是不是 RANK UP 的ステージ選択页（单次判定，供失败诊断用）。"""
+        ctx.screenshot()
+        for text, _cx, _cy, _score in read_text(ctx._last_screen):
+            t = text.upper().replace("级", "級")
+            if "NO REWARD" in t:
+                return True
+            if "RANK" in t and any(k in t for k in ("初級", "中級", "上級", "EX")):
+                return True
+        return False
+
+    @staticmethod
+    def _stage_charge_dialog(ctx):
+        """「挑戦可能数チャージ確認」弹窗：次数不足时问要不要花宝石买次数。
+
+        实测 2026-09-30：RANK UP 挑戦可能数 0/20 时点关卡行不会进ステージ情報，
+        而是弹这个框（マギジュエル 54,490 ▸ 54,440 / 挑戦可能数 0/20 ▸ 1/20 /
+        チャージ可能数 0 ▸ 0，底部 キャンセル + OK）。点 OK 会花宝石，必须取消。
+        弹窗 OCR 稳定读出「可能数」+「不足」（战字常丢），拿这两个词判定。
+        """
+        ctx.screenshot()
+        joined = "".join(t for t, *_ in read_text(ctx._last_screen))
+        return "可能数" in joined and "不足" in joined
 
     def _select_difficulty(self, ctx, difficulty):
         """按配置难度点击对应关卡行；找不到就滚动列表再找。"""
@@ -785,6 +821,14 @@ class _LegionGekihaTask(Task):
                 still = 0
                 last_screen = ctx._last_screen.copy()
                 continue
+            if is_title_screen(ctx):
+                # 2026-09-30 实测：战斗中途游戏自己重启（「データダウンロード」→ 回标题），
+                # 标题画面背景在动，`battle_screen_still` 永远不成立，一路空等 9 分钟才超时。
+                path = ctx.save_screenshot(ctx._last_screen, "battle_title_back.png")
+                ctx.logger.warn(
+                    f"游戏已回到标题画面（战斗被重启/掉线打断），放弃等待结算；"
+                    f"截图已保存: {path}")
+                return False
             if self._find_result_ok(ctx) is not None:
                 ctx.logger.info(f"战斗结算出现（{i*10}s）")
                 return True

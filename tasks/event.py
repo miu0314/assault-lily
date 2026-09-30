@@ -15,7 +15,7 @@ import time
 
 from core.navigation import ensure_home, click_home_button
 from core.ocr import read_text
-from core.pages import is_page
+from core.pages import is_page, is_title_screen
 from core.popups import (click_ok_by_ocr, close_content_popup,
                          handle_download_popup, handle_network_error)
 from core.vision import find_red_dots
@@ -1582,6 +1582,15 @@ class _ClearEventBase(_LegionGekihaTask):
             ctx.screenshot()
             if handle_network_error(ctx) or handle_download_popup(ctx):
                 continue
+            if is_title_screen(ctx):
+                # 2026-09-30 实测：游戏自己重启回标题后（「データダウンロード」→ 标题），
+                # 这里会一直等到 540 秒上限。标题＝战斗肯定没了，直接收工交给上层恢复。
+                path = ctx.save_screenshot(ctx._last_screen, "event_battle_title_back.png")
+                ctx.logger.warn(
+                    f"游戏已回到标题画面（战斗被重启/掉线打断），放弃等待结算；"
+                    f"截图已保存: {path}")
+                self.failed = True
+                return False
             # 「出撃確認」等弹窗（イベント特効メモリア未編成）：底部 キャンセル+OK -> 点 OK
             if self._dismiss_confirmation(ctx):
                 continue
