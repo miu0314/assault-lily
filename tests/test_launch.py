@@ -49,11 +49,26 @@ class _Screen:
         self.home = home
 
 
+class _Dev:
+    """设备桩：记录按键和重启调用。"""
+
+    def __init__(self):
+        self.keys = []
+        self.started = 0
+
+    def key(self, code):
+        self.keys.append(code)
+
+    def start_app(self):
+        self.started += 1
+
+
 class _Ctx:
     def __init__(self, screens, config=None):
         self.screens = screens
         self.config = _Config(config)
         self.logger = _Logger()
+        self.device = _Dev()
         self.clicks = []
         self.saved = []
         self.index = 0
@@ -77,16 +92,29 @@ class _Ctx:
         return f"screenshots/{name}"
 
 
-def _run_wait(ctx):
-    """跑一遍 WaitForHome，外部依赖全部换成桩。"""
-    with patch("tasks.launch.is_page", side_effect=lambda c, page: c.current.home), \
-            patch("tasks.launch.read_text", side_effect=lambda img: img.texts), \
-            patch("tasks.launch.close_content_popup", return_value=False), \
-            patch("tasks.launch.handle_download_popup", return_value=False), \
-            patch("tasks.launch.handle_network_error", return_value=False), \
-            patch("tasks.launch.click_ok_by_ocr", return_value=False), \
-            patch("tasks.launch.time.sleep"):
+def _run_wait(ctx, **extra):
+    """跑一遍 WaitForHome，外部依赖全部换成桩。
+
+    extra 里的键会被 patch 到 tasks.launch（值为 patch 的参数，例如
+    click_home_button={"return_value": True}），返回对应的 mock。
+    """
+    from contextlib import ExitStack
+
+    mocks = {}
+    with ExitStack() as stack:
+        stack.enter_context(patch("tasks.launch.is_page",
+                                  side_effect=lambda c, page: c.current.home))
+        stack.enter_context(patch("tasks.launch.read_text",
+                                  side_effect=lambda img: img.texts))
+        stack.enter_context(patch("tasks.launch.close_content_popup", return_value=False))
+        stack.enter_context(patch("tasks.launch.handle_download_popup", return_value=False))
+        stack.enter_context(patch("tasks.launch.handle_network_error", return_value=False))
+        stack.enter_context(patch("tasks.launch.click_ok_by_ocr", return_value=False))
+        stack.enter_context(patch("tasks.launch.time.sleep"))
+        for name, kwargs in extra.items():
+            mocks[name] = stack.enter_context(patch(f"tasks.launch.{name}", **kwargs))
         WaitForHome().on_run(ctx)
+    return mocks
 
 
 def _is_loading(ctx):
@@ -264,3 +292,55 @@ class WaitForHomeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class LoadingOcrThrottleTest(unittest.TestCase):
+    def test_is_loading_can_skip_ocr(self):
+        """允许跳过 OCR 时（省 CPU），不能再去调 read_text。"""
+        ctx = _Ctx([_Screen(texts=[("LOADING", 1215, 636, 1.00)])])
+        ctx.screenshot()
+
+        with patch("tasks.launch.read_text") as reader:
+            self.assertFalse(is_loading(ctx, allow_ocr=False))
+        self.assertFalse(reader.called)
+
+        with patch("tasks.launch.read_text", side_effect=lambda img: img.texts):
+            self.assertTrue(is_loading(ctx))
+
+
+class HomeReturnTest(unittest.TestCase):
+    """画面认不出来时，不能干等：主动点主页按钮 / 按返回键回首页。
+
+    实测 2026-09-30：游戏停在外征关卡列表，阶段1 每轮一次全屏 OCR + 模板匹配
+    再 sleep 3 秒，空转 4 分多钟、CPU 占满两个核，画面一动不动。
+    """
+
+    def _unknown_ctx(self, **config):
+        unknown = _Screen(texts=[("？？？", 640, 360, 0.5)])
+        data = {"home_wait_rounds": 6, "home_wait_rounds2": 2,
+                "home_return_after": 2}
+        data.update(config)
+        return _Ctx([unknown] * 400, config=data)
+
+    def test_unknown_screen_clicks_home_button(self):
+        ctx = self._unknown_ctx()
+        mocks = _run_wait(ctx, click_home_button={"return_value": True})
+
+        self.assertTrue(mocks["click_home_button"].called)
+        self.assertIn("回首页", ctx.logger.joined())
+
+    def test_unknown_screen_presses_back_when_home_button_useless(self):
+        ctx = self._unknown_ctx()
+        _run_wait(ctx, click_home_button={"return_value": False})
+
+        self.assertIn("BACK", ctx.device.keys)
+        self.assertIn("回首页", ctx.logger.joined())
+
+    def test_home_button_not_clicked_when_streak_is_short(self):
+        """只是偶尔认不出来（轮次不到阈值）时别乱点，避免误触。"""
+        unknown = _Screen(texts=[("？？？", 640, 360, 0.5)])
+        home = _Screen(home=True)
+        ctx = _Ctx([unknown, home, home, home],
+                   config={"home_wait_rounds": 4, "home_return_after": 3})
+        mocks = _run_wait(ctx, click_home_button={"return_value": True})
+
+        self.assertFalse(mocks["click_home_button"].called)

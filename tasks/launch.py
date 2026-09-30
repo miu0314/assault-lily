@@ -1,5 +1,6 @@
 import time
 
+from core.navigation import click_home_button
 from core.ocr import read_text
 from core.popups import (click_ok_by_ocr, close_content_popup,
                          handle_download_popup, handle_network_error)
@@ -18,15 +19,23 @@ LOADING_MARK_THRESHOLD = 0.75
 # 这是累计加载等待上限（秒），可用配置 home_loading_budget 覆盖。
 DEFAULT_LOADING_BUDGET = 900
 LOADING_SLEEP = 3
+# 全屏 OCR 很贵（约 2.5s、吃满多核），每 N 轮才做一次，中间用便宜模板兜底
+LOADING_OCR_EVERY = 2
 # 连续认不出画面、盲点这么多轮就存一张截图 + 打 OCR 摘要（下次能一眼看出卡在哪）
 STUCK_LOG_EVERY = 20
 TITLE_BTN = (640, 360)          # 标题画面点任意位置进入游戏
 
 
-def is_loading(ctx):
+def is_loading(ctx, allow_ocr=True):
+    """当前画面是不是加载/下载中。
+
+    allow_ocr=False 时跳过昂贵的全屏 OCR，只用便宜的模板兜底（调用方按轮次限流用）。
+    """
     """当前画面是不是加载/下载中。"""
     if ctx.find(LOADING_MARK_TEMPLATE, threshold=LOADING_MARK_THRESHOLD) is not None:
         return True
+    if not allow_ocr:
+        return False
     joined = "".join(t for t, *_ in read_text(ctx._last_screen))
     return LOADING_KEY in joined.upper().replace(" ", "")
 
@@ -112,26 +121,47 @@ class WaitForHome(Task):
 
         # 阶段1：处理 MuMu 弹窗 / 各类弹窗 / 加载 / 标题
         tapped_start = False
-        for _ in range(rounds1):
+        unknown_streak = 0
+        last_loading = False
+        home_return_after = int(ctx.config.get("home_return_after", 3))
+        for round_no in range(rounds1):
             ctx.screenshot()
             if is_page(ctx, "home"):
                 return
             if _handle_startup_popups(ctx, accel_action):
+                unknown_streak = 0
                 continue
             # 加载中：只等。不能点、更不能让外层判超时去重启游戏
             # （重启会把加载/下载打断，实测就是这么循环掉两个多小时的）。
-            if is_loading(ctx):
+            # OCR 隔轮做：跳过的轮次沿用上一轮结论，免得把加载中的画面当成「认不出」。
+            if round_no % LOADING_OCR_EVERY == 0:
+                last_loading = is_loading(ctx)
+            if last_loading:
+                unknown_streak = 0
                 if wait_loading():
                     ctx.logger.warn("加载等待超过预算，仍未进首页")
                     break
                 continue
             if _title_screen(ctx):
                 tapped_start = True
+                unknown_streak = 0
                 ctx.logger.info("检测到标题画面，点击任意位置进入游戏")
                 ctx.click(TITLE_BTN[0], TITLE_BTN[1], sleeptime=5)
                 continue
             if tapped_start:
                 break
+            unknown_streak += 1
+            # 画面认不出来又一直没变化：主动回首页。
+            # 实测 2026-09-30：停在外征关卡列表时干等了 4 分多钟、CPU 占满两核。
+            if unknown_streak >= home_return_after:
+                unknown_streak = 0
+                if click_home_button(ctx):
+                    ctx.logger.info("点主页按钮回首页")
+                    continue
+                ctx.logger.info("点主页按钮没反应，按返回键回首页")
+                ctx.device.key("BACK")
+                time.sleep(2)
+                continue
             time.sleep(3)
 
         # 阶段2：每秒点一次屏幕（领签到奖励），直到出现活动弹窗/通知并关闭。
@@ -141,7 +171,11 @@ class WaitForHome(Task):
         clicking = True
         idle = 0
         rounds_used = 0
+        round_no = 0
+        last_loading = False
         while rounds_used < rounds2:
+            round_no += 1
+            ocr_this_round = round_no % LOADING_OCR_EVERY == 0
             ctx.screenshot()
             # 弹窗永远优先于标题：MuMu 加速弹窗会盖在标题上，
             # 标题的「サポート」按钮照样命中 → 之前就是这样死循环的。
@@ -150,7 +184,10 @@ class WaitForHome(Task):
                 home_rounds = 0
                 idle = 0
                 continue
-            if is_loading(ctx):
+            # 同阶段1：跳过的轮次沿用上一轮 OCR 结论，别把加载中的画面当成「到首页了」
+            if ocr_this_round:
+                last_loading = is_loading(ctx)
+            if last_loading:
                 if wait_loading():
                     ctx.logger.warn("加载等待超过预算，仍未进首页")
                     return
@@ -180,6 +217,10 @@ class WaitForHome(Task):
                 idle = 0
                 continue
             if clicking:
+                if not ocr_this_round:
+                    # 这一轮没做加载判定，宁可不点，避免点在加载画面上
+                    time.sleep(1)
+                    continue
                 # 还没到活动弹窗：每秒点一次屏幕（领签到奖励）
                 ctx.click(TITLE_BTN[0], TITLE_BTN[1], sleeptime=1)
                 idle += 1
