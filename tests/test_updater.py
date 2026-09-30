@@ -152,3 +152,20 @@ class CacheTest(unittest.TestCase):
             self.assertTrue(mocked.called)
             self.assertIsNone(release)
             self.assertIn("离线", message)
+
+class StampTest(unittest.TestCase):
+    def test_stamp_is_stable_across_line_endings(self):
+        import updater as u
+
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            (Path(a) / "note.txt").write_bytes(b"line1\nline2\n")
+            (Path(b) / "note.txt").write_bytes(b"line1\r\nline2\r\n")
+            self.assertEqual(u.pack_stamp(Path(a)), u.pack_stamp(Path(b)))
+
+    def test_stamp_changes_with_content(self):
+        import updater as u
+
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            (Path(a) / "note.txt").write_bytes(b"same")
+            (Path(b) / "note.txt").write_bytes(b"different")
+            self.assertNotEqual(u.pack_stamp(Path(a)), u.pack_stamp(Path(b)))

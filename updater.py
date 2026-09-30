@@ -329,8 +329,9 @@ def pack_stamp(folder):
         if not path.is_file() or path.name == STAMP_FILE:
             continue
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(str(path.stat().st_size).encode("utf-8"))
         with open(path, "rb") as handle:
             for chunk in iter(lambda: handle.read(65536), b""):
-                digest.update(chunk)
+                # 行尾归一化：git 在不同机器上检出成 CRLF/LF，内容其实没变，
+                # 不归一化会导致同一个资源在不同环境算出不同版本号。
+                digest.update(chunk.replace(b"\r\n", b"\n"))
     return digest.hexdigest()[:8]
