@@ -1504,7 +1504,9 @@ class ClearLegionGekiha(_LegionGekihaTask):
             time.sleep(1)
         # 只按一次返回（列表页 → 菜单），然后轮询等待，避免连续按返回触发「返回标题」
         ctx.device.key("BACK")
-        for _ in range(10):
+        # 2026-10-02：这里原来轮询 10 轮，每轮还有模板匹配 + 全屏 OCR（`_dismiss_title_return`），
+        # 实测一趟「未能返回外征菜单」花了 3 分 13 秒。收敛到 6 轮，失败时留现场图。
+        for _ in range(6):
             time.sleep(1.5)
             ctx.screenshot()
             if self._is_legion_menu(ctx):
@@ -1518,7 +1520,11 @@ class ClearLegionGekiha(_LegionGekihaTask):
                 continue
             if self._is_stage_list_page(ctx):
                 ctx.device.key("BACK")
-        return self._is_legion_menu(ctx)
+        ok = self._is_legion_menu(ctx)
+        if not ok:
+            path = ctx.save_screenshot(ctx._last_screen, "legion_menu_stuck.png")
+            ctx.logger.warn(f"没能回到外征菜单，截图已保存: {path}")
+        return ok
 
     # ---------- 只清理可领奖关卡 ----------
     def _read_claimable_rows(self, ctx):

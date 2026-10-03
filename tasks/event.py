@@ -100,6 +100,9 @@ BLANK_SCREEN_MAX_VALUE = 40
 # 展开后同一个位置变成 CLOSE——但工具栏展开时 `_is_story_screen` 已经能认出 SKIP，
 # 不会走到“叫出按钮”这一步（实测 2026-09-12 ふじ 食堂；点画面中间只会推进对话）。
 STORY_REVEAL_BTN = (1203, 61)
+# 「点一下叫出按钮」最多试几次：试完还是认不出就放弃这个剧情节点。
+# 实测 2026-10-02：这条兜底没有上限时转过 18 轮 / 10 分 20 秒。
+STORY_REVEAL_TRIES = 3
 
 
 def _is_blank_screen(img, max_value=BLANK_SCREEN_MAX_VALUE):
@@ -506,11 +509,15 @@ class _ClearEventBase(_LegionGekihaTask):
         time.sleep(2)
         return True
 
-    def _recover_to_stage_list(self, ctx, rounds=4):
+    def _recover_to_stage_list(self, ctx, rounds=2):
         """从残留的剧情/结算画面回到关卡选择页；返回是否已经站在关卡选择页。
 
         实测 2026-09-18：读完活动剧情后画面可能还停在剧情播放页（第 4 话 SKIP 之后
         还在播后续），这时去点「バトル」标签必然找不到 → 整个活动的战斗被跳过。
+
+        轮次要克制：内层 `_back_to_stage_list` 自己最多转 8 轮，外层 4 轮叠起来
+        实测一次要 6 分钟（2026-10-02 一天里「页面上没有「X」标签」出现 4 次 ≈ 25 分钟）。
+        现在外层 2 轮，失败时存一张现场图再交给调用方。
         """
         for _ in range(rounds):
             ctx.screenshot()
@@ -530,6 +537,9 @@ class _ClearEventBase(_LegionGekihaTask):
                 continue
             if self._back_to_stage_list(ctx):
                 return True
+        if not self._is_target_stage_list(ctx):
+            path = ctx.save_screenshot(ctx._last_screen, "event_recover_stuck.png")
+            ctx.logger.warn(f"退回关卡选择页失败，截图已保存: {path}")
         return self._is_target_stage_list(ctx)
 
     @staticmethod
@@ -1074,18 +1084,22 @@ class _ClearEventBase(_LegionGekihaTask):
     def _play_story_node(self, ctx):
         """进入剧情节点后：全跳 + 领首通奖励，直到回到列表。返回是否完成过。"""
         idle = 0
+        reveal_tries = 0
         for _ in range(40):
             time.sleep(1)
             ctx.screenshot()
             if handle_network_error(ctx):
                 idle = 0
+                reveal_tries = 0
                 continue
             if _handle_download(ctx):
                 idle = 0
+                reveal_tries = 0
                 continue
             if _is_story_screen(ctx):
                 _skip_story(ctx)
                 idle = 0
+                reveal_tries = 0
                 continue
             if _is_blank_screen(ctx._last_screen):
                 # 动画播放页的控件会自动隐藏（整屏全黑、OCR 读不到 SKIP）：
@@ -1093,10 +1107,12 @@ class _ClearEventBase(_LegionGekihaTask):
                 ctx.logger.info("画面全黑（动画控件已隐藏），点一下叫出控件")
                 ctx.click(STORY_REVEAL_BTN[0], STORY_REVEAL_BTN[1], sleeptime=1)
                 idle = 0
+                reveal_tries = 0
                 continue
             if _is_reward_popup(ctx):
                 self._tap_ok(ctx, 500, 800, 590, 690)
                 idle = 0
+                reveal_tries = 0
                 continue
             if self._is_target_stage_list(ctx):
                 return True
@@ -1105,6 +1121,18 @@ class _ClearEventBase(_LegionGekihaTask):
             # 把按钮叫出来再判（实测 2026-09-12 ふじ 食堂 的プレストーリー）。
             idle += 1
             if idle >= 2:
+                # 但「点一下叫出按钮」不是万能的：实测 2026-10-02 剧情跳过后遇通信失败，
+                # 画面卡在一个谁也认不出的页面上，这条兜底转了 18 轮 / 10 分 20 秒
+                # （另一处 12:51 又转了 8 分钟），而且什么都没留下。
+                # 所以点几次还是认不出就放弃，存一张现场图 + OCR 交给上层退回关卡列表。
+                if reveal_tries >= STORY_REVEAL_TRIES:
+                    path = ctx.save_screenshot(ctx._last_screen, "story_stuck.png")
+                    joined = "".join(t for t, *_ in read_text(ctx._last_screen))[:120]
+                    ctx.logger.warn(
+                        f"点了 {reveal_tries} 次「叫出按钮」仍然认不出画面，放弃这个剧情节点；"
+                        f"截图已保存: {path}｜OCR: {joined}")
+                    return False
+                reveal_tries += 1
                 ctx.logger.info("没认出当前画面（剧情/动画按钮可能已隐藏），点一下叫出按钮")
                 ctx.click(STORY_REVEAL_BTN[0], STORY_REVEAL_BTN[1], sleeptime=1)
                 idle = 0

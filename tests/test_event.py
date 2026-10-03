@@ -1708,6 +1708,113 @@ class ClearEventStagesOrderTest(unittest.TestCase):
         self.assertIn((858, 61), ctx.clicks)       # 叫出来后点 SKIP
 
 
+    def test_play_story_node_bails_out_when_screen_stays_unrecognized(self):
+        """认不出画面又点不出来时要尽快收工，别死转 40 轮。
+
+        实测 2026-10-02：剧情跳过后遇到通信失败，画面变成脚本不认识的页面，
+        `_play_story_node` 就「点一下叫出按钮 → 还是认不出 → 再点」循环了
+        18 轮 / 10 分 20 秒（12:51 那次又转了 8 分钟），而且什么都不留。
+        改成：连续认不出到上限 → 存图 + 报错 → 交给上层退回列表。
+        """
+        from unittest.mock import patch
+
+        import numpy as np
+
+        task = ClearEventStages()
+        weird = np.full((720, 1280, 3), 200, np.uint8)
+
+        class _C:
+            def __init__(self):
+                self.logger = _Logger()
+                self._last_screen = weird
+                self.clicks = []
+                self.saved = []
+
+            def screenshot(self):
+                return self._last_screen
+
+            def click(self, x, y, sleeptime=1.0):
+                self.clicks.append((x, y))
+
+            def save_screenshot(self, img, name=None):
+                self.saved.append(name)
+                return f"screenshots/{name}"
+
+            def find(self, *a, **k):
+                return None
+
+        ctx = _C()
+        task._is_target_stage_list = lambda c: False
+        with patch("tasks.event.read_text",
+                   return_value=[("MENU", 1203, 61, 0.9)]), \
+                patch("tasks.story.read_text",
+                      return_value=[("MENU", 1203, 61, 0.9)]), \
+                patch("tasks.event.handle_network_error", return_value=False), \
+                patch("tasks.event._handle_download", return_value=False), \
+                patch("tasks.event._is_reward_popup", return_value=False), \
+                patch("tasks.event.time.sleep"):
+            ok = task._play_story_node(ctx)
+
+        self.assertFalse(ok)
+        self.assertLessEqual(len(ctx.clicks), 4)         # 没有一直点下去
+        self.assertTrue(any("story_stuck" in str(n) for n in ctx.saved))
+        self.assertIn("认不出", ctx.logger.joined())
+
+    def test_recover_to_stage_list_gives_up_quickly_with_evidence(self):
+        """标签恢复：找不到标签时最多试 2 轮，并留下现场截图。
+
+        实测 2026-10-02：一次日常里「页面上没有「X」标签」出现 4 次，
+        每次约 6 分钟（`_recover_to_stage_list` 4 轮 × 内层
+        `_back_to_stage_list` 最多 8 轮）。合计约 25 分钟全花在这里。
+        """
+        from unittest.mock import patch
+
+        import numpy as np
+
+        task = ClearEventStages()
+        screen = np.full((720, 1280, 3), 120, np.uint8)
+        calls = {"back": 0, "shots": 0, "saved": []}
+
+        class _C:
+            def __init__(self):
+                self.logger = _Logger()
+                self._last_screen = screen
+
+            def screenshot(self):
+                calls["shots"] += 1
+                return self._last_screen
+
+            def save_screenshot(self, img, name=None):
+                calls["saved"].append(name)
+                return f"screenshots/{name}"
+
+            def find(self, *a, **k):
+                return None
+
+            def key(self, code):
+                pass
+
+        def _back(ctx):
+            calls["back"] += 1
+            return False
+
+        ctx = _C()
+        task._is_target_stage_list = lambda c: False
+        task._dismiss_title_return = lambda c: False
+        task._back_to_stage_list = _back
+
+        with patch("tasks.event.read_text", return_value=[]), \
+                patch("tasks.event._is_story_screen", return_value=False), \
+                patch("tasks.event._is_reward_popup", return_value=False), \
+                patch("tasks.event.handle_network_error", return_value=False):
+            ok = task._recover_to_stage_list(ctx)
+
+        self.assertFalse(ok)
+        self.assertLessEqual(calls["back"], 2)           # 不再 4 轮 × 内层 8 轮
+        self.assertLessEqual(calls["shots"], 3)
+        self.assertIn("event_recover_stuck.png", calls["saved"])
+
+
 class BattleWaitTitleGuardTest(unittest.TestCase):
     """2026-09-30 实测：活动战斗中途游戏自己重启回标题，等待循环白等 9 分钟。
 

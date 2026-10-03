@@ -344,3 +344,36 @@ class HomeReturnTest(unittest.TestCase):
         mocks = _run_wait(ctx, click_home_button={"return_value": True})
 
         self.assertFalse(mocks["click_home_button"].called)
+
+
+class Phase2ResumeTapTest(unittest.TestCase):
+    """阶段2 点掉弹窗之后必须能恢复连点，不能一路静默空转到超时。
+
+    实测 2026-10-02：闪退恢复后的 WaitForHome 阶段2 开头点掉一个 OK 弹窗，
+    之后 `clicking` 一直是 False，只剩每轮 `sleep(2)`，90 轮（约 7 分钟）
+    后才报「等待首页超时」，中间日志一片空白 —— 用户看不出卡在哪。
+    """
+
+    def test_resumes_tapping_after_popup_dismissed(self):
+        unknown = _Screen(texts=[("？？？", 640, 360, 0.5)])
+        ctx = _Ctx([unknown] * 80,
+                   config={"home_wait_rounds": 1, "home_wait_rounds2": 12})
+        pops = {"n": 0}
+
+        def _ok(c, y_min=0, y_max=720):
+            pops["n"] += 1
+            return pops["n"] == 1          # 只有第一轮有弹窗可点
+
+        _run_wait(ctx, click_ok_by_ocr={"side_effect": _ok})
+
+        self.assertIn((640, 360), ctx.clicks)   # 弹窗点掉之后恢复了连点
+
+    def test_logs_progress_while_waiting(self):
+        """认不出画面时也要定期打一行进度，别让日志空 7 分钟。"""
+        unknown = _Screen(texts=[("？？？", 640, 360, 0.5)])
+        ctx = _Ctx([unknown] * 80,
+                   config={"home_wait_rounds": 1, "home_wait_rounds2": 12})
+
+        _run_wait(ctx)
+
+        self.assertIn("等待首页中", ctx.logger.joined())

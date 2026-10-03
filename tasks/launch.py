@@ -23,6 +23,12 @@ LOADING_SLEEP = 3
 LOADING_OCR_EVERY = 2
 # 连续认不出画面、盲点这么多轮就存一张截图 + 打 OCR 摘要（下次能一眼看出卡在哪）
 STUCK_LOG_EVERY = 20
+# 阶段2 里点掉一个弹窗后会先停一会儿不盲点；连续这么多轮没进展就恢复连点。
+# 实测 2026-10-02：以前点过弹窗后 `clicking` 再也不会变回 True，90 轮全程静默空转
+# 7 分钟才报「等待首页超时」。
+RESUME_TAP_AFTER = 6
+# 认不出画面时每这么多轮打一行进度，避免日志一片空白看不出卡在哪
+PROGRESS_LOG_EVERY = 10
 TITLE_BTN = (640, 360)          # 标题画面点任意位置进入游戏
 
 
@@ -192,6 +198,8 @@ class WaitForHome(Task):
                     return
                 continue
             rounds_used += 1
+            if rounds_used % PROGRESS_LOG_EVERY == 0:
+                ctx.logger.info(f"等待首页中…（已用 {rounds_used}/{rounds2} 轮）")
             # 通信恢复或返回标题后可能再次出现 TAP TO START，这里也要重新点
             if _title_screen(ctx):
                 clicking = True
@@ -231,8 +239,20 @@ class WaitForHome(Task):
                     ctx.logger.warn(f"启动画面连续 {idle} 轮没进展，"
                                     f"截图已保存: {path}｜OCR: {joined}")
             else:
+                # 实测 2026-10-02：这里原来只有 sleep(2)。点掉一次弹窗后 `clicking`
+                # 就再也不会回到 True，于是 90 轮全程静默空转（约 7 分钟）才报超时，
+                # 日志里一行都不打。现在连续几轮没进展就恢复连点。
+                idle += 1
+                if idle >= RESUME_TAP_AFTER:
+                    ctx.logger.info("画面一直没有进展，恢复连点屏幕")
+                    clicking = True
                 time.sleep(2)
         ctx.logger.warn("等待首页超时")
+        try:
+            path = ctx.save_screenshot(ctx._last_screen, "startup_timeout.png")
+            ctx.logger.info(f"等待首页超时，现场截图已保存: {path}")
+        except Exception:
+            pass
 
 
 class LaunchToHome(Task):

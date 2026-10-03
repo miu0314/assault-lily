@@ -32,6 +32,7 @@ class _Ctx:
         self.logger = _Logger()
         self.saved = []
         self.shots = 0
+        self.device = _Dev()
 
     def screenshot(self, *a, **k):
         self._last_screen = self.screens[min(self.index, len(self.screens) - 1)]
@@ -50,6 +51,16 @@ class _Ctx:
 
 def _frame(value):
     return np.full((720, 1280, 3), value, np.uint8)
+
+
+class _Dev:
+    """设备桩：只记按键。"""
+
+    def __init__(self):
+        self.keys = []
+
+    def key(self, code):
+        self.keys.append(code)
 
 
 class BattleScreenStillTest(unittest.TestCase):
@@ -166,6 +177,33 @@ class RankUpChargeDialogTest(unittest.TestCase):
                 ("OK", 758, 650, 0.98)]
         with patch("tasks.quests.read_text", return_value=toks):
             self.assertFalse(SweepRankUpStage._stage_charge_dialog(ctx))
+
+
+class BackToMenuTest(unittest.TestCase):
+    """外征菜单回不去时别死转 13 轮。
+
+    实测 2026-10-02：战斗没开起来提前放弃之后，「未能返回外征菜单」这一趟
+    花了 3 分 13 秒（10:50:08 → 10:53:21，3 轮 + 10 轮轮询，每轮还要
+    模板匹配 + 全屏 OCR）。现在把轮询收敛到 6 轮，失败时留一张现场图。
+    """
+
+    def test_gives_up_early_and_saves_screenshot(self):
+        ctx = _Ctx([_frame(120)] * 20)
+        task = ClearLegionGekiha()
+        task._is_legion_menu = lambda c: False
+        task._dismiss_title_return = lambda c: False
+        task._is_stage_list_page = lambda c: False
+
+        with patch("tasks.quests.time.sleep"), \
+                patch("tasks.quests.handle_network_error", return_value=False), \
+                patch("tasks.quests.handle_download_popup", return_value=False), \
+                patch("tasks.quests.close_content_popup", return_value=False):
+            ok = task._back_to_menu(ctx)
+
+        self.assertFalse(ok)
+        self.assertEqual(ctx.device.keys, ["BACK"])
+        self.assertLessEqual(ctx.shots, 9)          # 3 + 6 轮（原来是 3 + 10）
+        self.assertIn("legion_menu_stuck.png", ctx.saved)
 
 
 if __name__ == "__main__":
