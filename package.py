@@ -14,6 +14,7 @@
 换模板不用重新打包。
 """
 
+import csv
 import shutil
 import subprocess
 import sys
@@ -78,7 +79,43 @@ def check_pyinstaller():
     return True
 
 
+def running_instances(name=f"{APP_NAME}.exe"):
+    r"""返回正在运行的本程序 PID 列表（Windows；其它平台返回空）。
+
+    2026-10-03 事故：打包时 dist 里的启动器还开着，PyInstaller「先删 dist
+    再重建」删到被占用的 `_internal\cv2\cv2.pyd` 就 PermissionError 中止，
+    留下一个 exe 还在、`_internal` 被删了一半的安装 —— 用户第二天双击直接
+    弹「突击莉莉脚本启动失败」。所以打包前必须先确认本程序没在运行。
+    """
+    if sys.platform != "win32":
+        return []
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {name}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20)
+    except Exception:
+        return []
+    if result is None or result.returncode != 0:
+        return []
+    pids = []
+    for row in csv.reader(result.stdout.splitlines()):
+        if len(row) >= 2 and row[0].strip().lower() == name.lower():
+            try:
+                pids.append(int(row[1]))
+            except ValueError:
+                pass
+    return pids
+
+
 def build():
+    running = running_instances()
+    if running:
+        pids = ", ".join(str(pid) for pid in running)
+        print(f"打包中止：{APP_NAME} 还在运行（PID: {pids}）。")
+        print("请先关掉启动器窗口、停止正在跑的任务，再重新打包 ——")
+        print("否则 PyInstaller 会删到被占用的文件，留下一个启动不起来的安装。")
+        return False
     args = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean",
@@ -95,6 +132,7 @@ def build():
     print("开始打包：")
     print("  " + " ".join(args))
     subprocess.run(args, check=True, cwd=str(BASE_DIR))
+    return True
 
 
 def stage(app_dir):
@@ -143,7 +181,8 @@ def folder_size(path):
 def main():
     if not check_pyinstaller():
         return 1
-    build()
+    if not build():
+        return 1
     app_dir = DIST_DIR / APP_NAME
     exe_path = app_dir / f"{APP_NAME}.exe"
     if not exe_path.exists():
