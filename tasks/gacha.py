@@ -112,6 +112,12 @@ class CollectFreeGacha(Task):
                         break
                     ctx.logger.info(f"banner y={by} 详情加载慢，第 {attempt + 1} 次重试")
                     time.sleep(3)
+                # 每天 1 次的免费抽用掉之后，按钮上会盖「既に引き終わっています。」。
+                # 这时候再点也没用，直接收工（别再去扫别的 banner 找“替代品”）。
+                if self._already_pulled(ctx):
+                    ctx.logger.info("今天的免费 11 回已经抽过了"
+                                    "（按钮显示「既に引き終わっています。」），结束免费扭蛋")
+                    return pulled
                 if btn is None:
                     ctx.logger.info(f"左侧第 {by} 行没有免费入口（已抽过或无免费），跳过")
                     if not self._back_to_gacha_list(ctx):
@@ -314,6 +320,11 @@ class CollectFreeGacha(Task):
                 continue
             cost = CollectFreeGacha._cost_near_button(ctx, bx, by)
             if cost is None:
+                # 读不到金额时只有一种情况可以放行：页面本身写着「無料」
+                # （無料11回ガチャ 的按钮上那个 0 很小，OCR 有时读不出来）。
+                if CollectFreeGacha._pane_says_free(ctx):
+                    ctx.logger.info(f"按钮 {tpl} 读不到消费数字，但页面写着「無料」，按免费处理 ({bx},{by})")
+                    return (bx, by)
                 ctx.logger.info(f"按钮 {tpl} 附近读不到消费数字，按不可免费处理 ({bx},{by})")
                 continue
             if cost > 0:
@@ -384,13 +395,8 @@ class CollectFreeGacha(Task):
                 break
 
     @staticmethod
-    def _left_banner_rows(ctx):
-        """OCR 识别左侧栏 banner 条目中心 y（按 ~100px 聚类）。"""
-        ys = []
-        for text, cx, cy, score in read_text(ctx._last_screen):
-            if cx < 190 and 70 <= cy <= 680:
-                ys.append(cy)
-        ys.sort()
+    def _cluster_rows(ys):
+        ys = sorted(ys)
         groups = []
         for y in ys:
             if groups and y - groups[-1][-1] < 45:
@@ -400,12 +406,78 @@ class CollectFreeGacha(Task):
         return [int(sum(g) / len(g)) for g in groups]
 
     @staticmethod
+    def _left_banner_rows(ctx):
+        """OCR 识别左侧栏 banner 条目中心 y（按 ~100px 聚类）。"""
+        ys = [cy for text, cx, cy, score in read_text(ctx._last_screen)
+              if cx < 190 and 70 <= cy <= 680]
+        return CollectFreeGacha._cluster_rows(ys)
+
+    @staticmethod
+    def _left_free_rows(ctx):
+        """左侧栏里写着「無料」的 banner 行 y。
+
+        每天 1 次的免费 11 回（無料11回ガチャ）在左栏读到的字样就是「無料11回」。
+        """
+        ys = [cy for text, cx, cy, score in read_text(ctx._last_screen)
+              if cx < 190 and 70 <= cy <= 680
+              and ("無料" in str(text) or "无料" in str(text))]
+        return CollectFreeGacha._cluster_rows(ys)
+
+    @staticmethod
+    def _find_free_row(ctx):
+        """找左侧「無料」入口那一行（**没抽过时它排在列表最上面**）。
+
+        2026-10-05 用户提示：免费 11 回没抽过时在最上面、抽过之后才沉到最底下。
+        所以只在当前视野里找就够：找不到 = 今天已经抽过（或这期没有），什么都不用做。
+        不要为了找它去翻列表 —— 翻到底要好几屏，而那时它一定已经抽过了。
+        """
+        rows = CollectFreeGacha._left_free_rows(ctx)
+        return rows[0] if rows else None
+
+    @staticmethod
+    def _pane_says_free(ctx):
+        """右侧详情页有没有写「無料」（無料11回ガチャ / 毎日1回引ける！11回無料ガチャ！）。
+
+        只看 x>=300 的正文区，避免把左侧列表那行的「無料11回」也算进来。
+        """
+        for text, cx, cy, score in read_text(ctx._last_screen):
+            if cx >= 300 and ("無料" in str(text) or "无料" in str(text)):
+                return True
+        return False
+
+    @staticmethod
     def _free_banner_rows(ctx):
-        """免费入口一般在列表最前面，只查前两行，避免翻遍所有 banner。"""
+        """要先点哪些左侧 banner 行。
+
+        2026-10-05 实测：免费入口（無料11回ガチャ）排在左栏**最底下第 7 行**，
+        旧逻辑只看前两行 → 永远找不到它，于是把付费 banner 当成免费入口去点。
+        现在优先扫带「無料」标记的行；没有标记时才退回老行为（前两行）。
+        """
+        free_y = CollectFreeGacha._find_free_row(ctx)
+        if free_y is not None:
+            ctx.logger.info(f"左栏发现免费入口行 y={free_y}")
+            return [free_y]
         rows = CollectFreeGacha._left_banner_rows(ctx)
         if len(rows) > 2:
-            ctx.logger.info(f"左栏共 {len(rows)} 行，只检查前两行：{rows[:2]}")
+            ctx.logger.info(f"左栏共 {len(rows)} 行，没有「無料」标记，只检查前两行：{rows[:2]}")
         return rows[:2]
+
+    # 「每天 1 次的免费抽用掉之后」按钮上会盖一层「既に引き終わっています。」；
+    # 真机 OCR 只稳定读出「既終」两个字，位置就在抽卡按钮上（右下角）。
+    USED_MARK_REGION = (900, 1280, 560, 700)
+
+    @staticmethod
+    def _already_pulled(ctx):
+        """抽卡按钮上是不是「既に引き終わっています。」（今天的免费已经抽过）。"""
+        ctx.screenshot()
+        x0, x1, y0, y1 = CollectFreeGacha.USED_MARK_REGION
+        for text, cx, cy, score in read_text(ctx._last_screen):
+            t = str(text)
+            if "引き終わ" in t:
+                return True
+            if "既" in t and "終" in t and x0 <= cx <= x1 and y0 <= cy <= y1:
+                return True
+        return False
 
     @staticmethod
     def _find_free_pull_button(ctx):

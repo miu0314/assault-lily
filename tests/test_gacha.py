@@ -42,9 +42,13 @@ class _Logger:
 class _Dev:
     def __init__(self):
         self.keys = []
+        self.swipes = []
 
     def key(self, code):
         self.keys.append(code)
+
+    def swipe(self, x1, y1, x2, y2, duration=300):
+        self.swipes.append((x1, y1, x2, y2))
 
 
 class _Ctx:
@@ -173,6 +177,22 @@ class FreeButtonCostTest(unittest.TestCase):
         with _fake_read_text(ctx):
             self.assertIsNone(CollectFreeGacha._free_button_on_screen(ctx))
 
+    def test_unreadable_cost_ok_when_pane_says_free(self):
+        """页面正文写着「無料」时，那个小小的 0 读不出来也放行。"""
+        ctx = _Ctx(texts=[("無料11回ガチャ", 415, 81, 0.84),
+                          ("毎日1回引ける！11回無料ガチャ！", 472, 573, 0.91)],
+                   finds={"gacha/btn_free_eleven.png": ((1137, 638), 0.95)})
+        with _fake_read_text(ctx):
+            self.assertEqual(CollectFreeGacha._free_button_on_screen(ctx),
+                             (1137, 638))
+
+    def test_left_list_free_marker_alone_does_not_count(self):
+        """只有左侧列表那行写着「無料」不算（它一直在那），必须是右侧正文。"""
+        ctx = _Ctx(texts=[("無料11回", 76, 630, 0.99)],
+                   finds={"gacha/btn_free_eleven.png": ((1137, 638), 0.95)})
+        with _fake_read_text(ctx):
+            self.assertIsNone(CollectFreeGacha._free_button_on_screen(ctx))
+
     def test_free_single_is_recognized_next_to_paid_eleven(self):
         """同一行里「1回 0（免费）」+「11回 1,500（付费）」并存时，只认免费那个。"""
         ctx = _Ctx(texts=[("1回ガチャ", 924, 632, 0.95),
@@ -193,6 +213,92 @@ class FreeButtonCostTest(unittest.TestCase):
                    finds={"gacha/btn_free_one.png": ((1137, 638), 0.95)})
         with _fake_read_text(ctx):
             self.assertIsNone(CollectFreeGacha._free_button_on_screen(ctx))
+
+
+class FreeBannerRowTest(unittest.TestCase):
+    """免费入口不一定在前两行。
+
+    实测 2026-10-05（截图 screenshots/now_1005.png）：每日免费的那个是
+    「無料11回ガチャ」，排在**左栏最底下第 7 行**（y≈630），
+    OCR 在左栏读到的字样是「無料11回」。
+    旧逻辑只扫前两行 → 永远找不到它，反而把付费 banner 当成免费。
+    """
+
+    def _list_texts(self):
+        return [("★5確定チケット", 80, 111, 0.8),
+                ("11回チケットガチャ", 71, 236, 0.7),
+                ("★5確定", 71, 325, 0.9),
+                ("Ver.2", 70, 351, 0.9),
+                ("23以上", 72, 431, 0.9),
+                ("Generation.4", 69, 551, 0.9),
+                ("無料11回", 76, 630, 0.99)]
+
+    def test_left_free_rows_finds_bottom_row(self):
+        ctx = _Ctx(texts=self._list_texts())
+        with _fake_read_text(ctx):
+            self.assertEqual(CollectFreeGacha._left_free_rows(ctx), [630])
+
+    def test_free_banner_rows_prefers_free_marker(self):
+        """有「無料」标记时，先扫那一行，而不是死守前两行。"""
+        ctx = _Ctx(texts=self._list_texts())
+        with _fake_read_text(ctx):
+            self.assertEqual(CollectFreeGacha._free_banner_rows(ctx), [630])
+
+    def test_free_banner_rows_falls_back_to_first_two(self):
+        """没有「無料」标记时保持老行为：只查前两行。"""
+        ctx = _Ctx(texts=[("★5確定チケット", 80, 111, 0.8),
+                          ("Ver.2", 71, 236, 0.7),
+                          ("23以上", 72, 431, 0.9)])
+        with _fake_read_text(ctx):
+            self.assertEqual(CollectFreeGacha._free_banner_rows(ctx), [111, 236])
+
+    def test_find_free_row_only_looks_at_current_view(self):
+        """没抽过时免费入口在最上面；当前视野没有就当“今天没有了”，不翻列表。
+
+        2026-10-05 用户提示：抽过之后它才沉到最底下 —— 那时本来就没得抽，
+        为它翻好几屏纯属浪费（实测翻 3 屏也到不了底）。
+        """
+        ctx = _Ctx(texts=[])
+        with patch.object(CollectFreeGacha, "_left_free_rows", return_value=[]):
+            self.assertIsNone(CollectFreeGacha._find_free_row(ctx))
+
+
+class AlreadyPulledTest(unittest.TestCase):
+    """每天 1 次的免费抽用掉之后，按钮上会盖「既に引き終わっています。」。"""
+
+    def test_detects_used_overlay(self):
+        # 真机 OCR 只读出「既終」两个字（位置在按钮上）
+        ctx = _Ctx(texts=[("無料11回", 76, 630, 0.99), ("既終", 1118, 644, 0.95)])
+        with _fake_read_text(ctx):
+            self.assertTrue(CollectFreeGacha._already_pulled(ctx))
+
+    def test_normal_screen_is_not_used(self):
+        ctx = _Ctx(texts=[("無料11回", 76, 630, 0.99), ("11回ガチャ", 1160, 632, 0.95)])
+        with _fake_read_text(ctx):
+            self.assertFalse(CollectFreeGacha._already_pulled(ctx))
+
+    def test_used_free_banner_stops_without_clicking_button(self):
+        """已经抽过：不点抽卡按钮，直接结束（不再瞎扫其它 banner）。"""
+        task = CollectFreeGacha()
+        ctx = _Ctx(texts=[("無料11回", 76, 630, 0.99), ("既終", 1118, 644, 0.95)],
+                   finds={"gacha/btn_free_eleven.png": ((1137, 638), 0.95)})
+
+        with patch("tasks.gacha.is_page", return_value=True), \
+                patch("tasks.gacha.read_text", side_effect=lambda img: ctx.texts), \
+                patch.object(CollectFreeGacha, "_wait_gacha_list_ready",
+                             return_value=True), \
+                patch.object(CollectFreeGacha, "_reset_left_list", return_value=None), \
+                patch.object(CollectFreeGacha, "_left_banner_rows",
+                             return_value=[111, 236, 630]), \
+                patch.object(CollectFreeGacha, "_wait_banner_ready",
+                             return_value=None), \
+                patch.object(CollectFreeGacha, "_back_to_gacha_list",
+                             return_value=True):
+            pulled = task._try_free_banners(ctx)
+
+        self.assertEqual(pulled, 0)
+        self.assertNotIn((1137, 638), ctx.clicks)      # 没点抽卡按钮
+        self.assertIn("已经抽过", ctx.logger.joined())
 
 
 class ConfirmAndPullTest(unittest.TestCase):
