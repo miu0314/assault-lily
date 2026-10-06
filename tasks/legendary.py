@@ -3,6 +3,7 @@
 
 import time
 import json
+import re
 from pathlib import Path
 
 from core.navigation import click_home_button, ensure_home
@@ -64,6 +65,26 @@ def _click_in(ctx, template, x_range, y_range, threshold=0.8, sleeptime=4):
 def _ocr_has(ctx, keywords):
     joined = "".join(t for t, *_ in read_text(ctx._last_screen))
     return any(k in joined for k in keywords)
+
+
+def _selected_from_pairs(texts):
+    """从扫荡确认弹窗的 OCR 里读出「本次实际扫荡次数」。
+
+    弹窗里有两组「消费前 ▸ 消费后」（跳过券 / BP，例如 4/5 ▸ 0/5），
+    两组的差值就是次数；读不出成对数字时返回 None。
+
+    实机（2026-10-06）：BP 4/5 时配 5 次，弹窗最大只到 4 —— 旧日志会
+    误报「已设为 5」，靠这里读出的真实值修正。
+    """
+    pairs = []
+    for text, *_ in texts:
+        m = re.search(r"(\d+)\s*/\s*(\d+)", str(text))
+        if m:
+            pairs.append((int(m.group(1)), int(m.group(2))))
+    for (cur, mx), (after, mx2) in zip(pairs, pairs[1:]):
+        if mx == mx2 and cur >= after:
+            return cur - after
+    return None
 
 
 class LegendaryBattle(Task):
@@ -226,14 +247,29 @@ class LegendaryBattle(Task):
         if not ok:
             ctx.logger.warn("扫荡设置弹窗未出现")
             return False
-        # 点 + 的次数 = 扫荡次数（默认 1 次）
+        path = ctx.save_screenshot(ctx._last_screen, "lg_sweep_dialog_before.png")
+        ctx.logger.info("扫荡弹窗初始文字: " + " | ".join(t for t, *_ in read_text(ctx._last_screen)))
+        # 对话框默认 0，点几次 + 就是几次；上限是「当前 BP」（实机 2026-10-06：
+        # BP 4/5 配 5 次时，+ 点到 4 就封顶，再多点也不动）。
         for i in range(count):
             if not _click_in(ctx, TPL_SWEEP_PLUS, (750, 850), (390, 440), sleeptime=2):
                 ctx.logger.warn(f"没找到数量 + 按钮（第 {i + 1} 次）")
                 return False
-        ctx.logger.info(f"扫荡次数已设为 {count}")
         ctx.screenshot()
-        for text, cx, cy, score in read_text(ctx._last_screen):
+        path = ctx.save_screenshot(ctx._last_screen, "lg_sweep_dialog.png")
+        texts = read_text(ctx._last_screen)
+        ctx.logger.info("扫荡弹窗设定后文字: " + " | ".join(t for t, *_ in texts))
+        selected = _selected_from_pairs(texts)
+        if selected is None:
+            ctx.logger.warn(f"读不出弹窗里的数量，按配置 {count} 次继续")
+        elif selected == 0:
+            ctx.logger.warn("扫荡数量还是 0（BP / 跳过券不足），取消本次扫荡")
+            return False
+        elif selected != count:
+            ctx.logger.warn(f"扫荡弹窗实际数量 {selected}（配置 {count}，被上限卡住）")
+        else:
+            ctx.logger.info(f"扫荡次数已设为 {selected}")
+        for text, cx, cy, score in texts:
             if text.strip().upper() == "OK" and 450 <= cx <= 900 and 550 <= cy <= 700:
                 ctx.logger.info(f"点击扫荡确认 OK ({cx},{cy})")
                 ctx.click(cx, cy, sleeptime=5)

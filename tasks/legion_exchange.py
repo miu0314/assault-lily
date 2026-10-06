@@ -211,6 +211,10 @@ class ExchangeLegionItems(Task):
     @staticmethod
     def _is_legion_page(ctx):
         joined = "".join(t for t, *_ in read_text(ctx._last_screen))
+        # 传奇战斗页面也有「メダル交換所」按钮：先排除，避免把
+        # 「グレードD バトルに挑む」当成交换所入口点到（2026-10-06 实机踩到）。
+        if "レジェンダリ" in joined or "LEGENDARY" in joined.upper():
+            return False
         return "交換所" in joined or "レギオン" in joined or "外征任務" in joined
 
     def _click_shop_entry(self, ctx):

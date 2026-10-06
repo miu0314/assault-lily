@@ -13,6 +13,7 @@ launcher_error.log
 selftest.log
 selftest_ocr.png
 screenshots/
+logs/
 
 # 个人配置与临时备份（仓库里只留 config.example.json）
 config.json
