@@ -248,6 +248,53 @@ class ClaimEventRewardTest(unittest.TestCase):
         self.assertEqual(clicks, [(134, 587), (900, 600), (700, 620)])
 
 
+    def test_claim_reward_accepts_ocr_of_kaishu_as_huishu(self):
+        """踏破イベント的「回収」会被 OCR 读成「回收」，关键词里也要认。
+
+        实测 2026-10-07：サバイバルアタック 左栏「回収」上挂着 100 个未领奖励，
+        但 OCR 输出的是「回收」—— 关键词只有「報酬 / 回収」→ 找不到按钮 →
+        静默返回 False，奖励一直没领（同一天的正常活动「報酬」能正常领）。
+        """
+        task = ClearEventStages()
+        clicks = []
+        tokens = [("回收", 142, 596, 0.99)]          # 实机 OCR 输出
+
+        class _C:
+            def __init__(self):
+                self.logger = _Logger()
+                self._last_screen = object()
+
+            def screenshot(self):
+                return self._last_screen
+
+            def click(self, x, y, sleeptime=1.0):
+                clicks.append((x, y))
+
+            def find(self, name, threshold=None):
+                return None                          # 模板也认不出这个按钮
+
+        ctx = _C()
+
+        def find_text(c, keys, region):
+            x0, x1, y0, y1 = region
+            for t, cx, cy, s in tokens:
+                if (x0 <= cx <= x1 and y0 <= cy <= y1
+                        and any(k in t for k in keys)):
+                    return (cx, cy)
+            return None
+
+        task._find_text = find_text
+        task._is_target_stage_list = lambda c: True
+        task._is_event_list = lambda c: False
+        with patch("tasks.event.time.sleep"), \
+                patch("tasks.event.handle_network_error", return_value=False), \
+                patch("tasks.event._handle_download", return_value=False):
+            ok = task._claim_event_reward(ctx)
+
+        self.assertTrue(ok)
+        self.assertEqual(clicks, [(142, 596)])
+
+
 class _TabCtx:
     """_goto_tab / _recover_to_stage_list 依赖的最小 context。"""
 
@@ -344,7 +391,7 @@ class GotoTabRecoveryTest(unittest.TestCase):
         task.processed_count = 0
         fought = []
         task._wait_stage_info = lambda c, rounds=15: True
-        task._wait_next_stage_info = lambda c, rounds=10: True
+        task._wait_next_stage_info = lambda c, rounds=10: "info"
         task._ap_ok = lambda c: True
         task._fight_current_stage = lambda c: (fought.append(1), True)[1]
         task._back_to_stage_list = lambda c: True
@@ -499,6 +546,158 @@ class GotoTabRecoveryTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(state["cancelled"])
         self.assertIn("「タイトルに戻る」", ctx.logger.joined())
+
+
+class NextStageHandoffTest(unittest.TestCase):
+    """点「次へ」之后的三种去向（2026-10-07 踏破イベント实机踩到）。
+
+    实测 サバイバルアタック ステージ05→06：点「次へ」**不经过ステージ情報**，
+    保留上次队伍时游戏直接开打下一关（+3s 加载 → +10s 开场动画 → +35s 已经在
+    打 WAVE 1/1）。旧代码只认「消費AP」，等 96 秒判失败 → 按 BACK 乱走，
+    那天卡了 12 分钟、最后整个活动判「清关失败」。
+    """
+
+    class _C:
+        def __init__(self):
+            self.logger = _Logger()
+            self._last_screen = object()
+            self.saved = []
+            self.clicks = []
+
+        def screenshot(self):
+            return self._last_screen
+
+        def click(self, x, y, sleeptime=1.0):
+            self.clicks.append((x, y))
+
+        def save_screenshot(self, img, name=None):
+            self.saved.append(name)
+            return "screenshots/" + str(name)
+
+    def _wait(self, texts):
+        task = ClearEventStages()
+        ctx = self._C()
+        with patch("tasks.event.read_text", return_value=list(texts)), \
+                patch("tasks.event.handle_network_error", return_value=False), \
+                patch("tasks.event._handle_download", return_value=False), \
+                patch("tasks.event.time.sleep"):
+            state = task._wait_next_stage_info(ctx)
+        return state
+
+    def test_accepts_stage_info_page(self):
+        state = self._wait([("ステージ情報", 100, 35, 0.95),
+                            ("消費AP：", 60, 196, 0.9)])
+        self.assertEqual(state, "info")
+
+    def test_accepts_stage_info_title_without_ap_text(self):
+        # 踏破活动 AP 栏是「—」；万一 OCR 没读到「消費AP」，标题也要认
+        state = self._wait([("ステージ情報", 100, 35, 0.95),
+                            ("推奨総戦闘力", 400, 200, 0.9)])
+        self.assertEqual(state, "info")
+
+    def test_detects_directly_started_battle(self):
+        state = self._wait([("HOME", 42, 27, 0.9), ("WAVE 1/1", 700, 26, 0.9),
+                            ("AUTO MODE", 800, 590, 0.9)])
+        self.assertEqual(state, "battle")
+
+    def test_clear_page_is_not_a_handoff_success(self):
+        state = self._wait([("STAGE CLEAR", 640, 37, 0.95),
+                            ("▶次へ", 890, 658, 0.9), ("OK", 1180, 658, 0.9)])
+        self.assertFalse(state)
+
+    def test_clear_bonus_page_is_not_a_handoff_success(self):
+        state = self._wait([("CLEAR BONUS", 640, 37, 0.95),
+                            ("初回クリア報酬獲得", 640, 120, 0.9),
+                            ("OK", 638, 618, 0.9)])
+        self.assertFalse(state)
+
+    def test_clear_one_stage_follows_auto_started_battle(self):
+        """「次へ」直接开打下一关：不再点ユニット選択，等结算后接着链下去。"""
+        task = ClearEventStages()
+        task.processed_count = 0
+        fought = []
+        settled = []
+        task._wait_stage_info = lambda c, rounds=15: True
+        task._ap_ok = lambda c: True
+        task._fight_current_stage = lambda c: (fought.append(1), True)[1]
+        task._wait_next_stage_info = lambda c, rounds=10: "battle"
+        task._battle_and_clear = lambda c: True
+        task._back_to_stage_list = lambda c: True
+        settle = [True, False]   # 第一次「次へ」；自动开打的这关打完点 OK 收工
+
+        def settle_once(c):
+            settled.append(1)
+            return settle.pop(0) if settle else False
+
+        task._settle_current_stage = settle_once
+
+        ctx = self._C()
+        with patch("tasks.event.time.sleep"):
+            ok = task._clear_one_stage(ctx, 300)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(fought), 1)     # 只有第一关是主动开的
+        self.assertEqual(len(settled), 2)    # 自动开打的那关也走了结算处理
+        self.assertEqual(task.processed_count, 1)
+        self.assertIn("直接开打", ctx.logger.joined())
+
+    def test_clear_one_stage_saves_screenshot_when_handoff_lost(self):
+        task = ClearEventStages()
+        task.processed_count = 0
+        task._wait_stage_info = lambda c, rounds=15: True
+        task._ap_ok = lambda c: True
+        task._fight_current_stage = lambda c: True
+        task._settle_current_stage = lambda c: True
+        task._wait_next_stage_info = lambda c, rounds=10: False
+        task._back_to_stage_list = lambda c: False
+
+        ctx = self._C()
+        with patch("tasks.event.time.sleep"):
+            ok = task._clear_one_stage(ctx, 300)
+
+        self.assertFalse(ok)
+        self.assertIn("event_next_stage_stuck.png", ctx.saved)
+        self.assertIn("没等到下一关", ctx.logger.joined())
+
+
+    def test_enter_event_stage_select_bails_out_on_frozen_screen(self):
+        """连续多轮画面完全没变化：提前放弃并存 event_recover_stuck.png。"""
+        import numpy as np
+
+        task = ClearEventStages()
+        shots = []
+
+        class _C:
+            def __init__(self):
+                self.logger = _Logger()
+                self._last_screen = np.zeros((720, 1280, 3), np.uint8)
+                self.saved = []
+
+            def screenshot(self):
+                shots.append(1)
+                return self._last_screen
+
+            def save_screenshot(self, img, name=None):
+                self.saved.append(name)
+                return "screenshots/" + str(name)
+
+            def find(self, *args, **kwargs):
+                return None
+
+        ctx = _C()
+        task._is_target_stage_list = lambda c: False
+        with patch("tasks.event.read_text", return_value=[]), \
+                patch("tasks.event.handle_download_popup", return_value=False), \
+                patch("tasks.event.handle_network_error", return_value=False), \
+                patch("tasks.event.close_content_popup", return_value=False), \
+                patch("tasks.event.is_page", return_value=False), \
+                patch("tasks.event.time.sleep"):
+            ok = task._enter_event_stage_select(ctx)
+
+        self.assertFalse(ok)
+        self.assertIn("event_recover_stuck.png", ctx.saved)
+        self.assertIn("提前放弃", ctx.logger.joined())
+        self.assertLess(len(shots), 40)          # 没跑满 40 轮
 
 
 class WaitEventKindTest(unittest.TestCase):

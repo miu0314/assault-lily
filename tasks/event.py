@@ -365,13 +365,40 @@ class _ClearEventBase(_LegionGekihaTask):
             return True
         return False
 
-    def _enter_event_stage_select(self, ctx):
-        for _ in range(40):
+    def _enter_event_stage_select(self, ctx, rounds=40):
+        """从任意画面回到活动关卡选择页。
+
+        2026-10-07 加：每 5 轮打进度日志；连续 8 轮画面几乎没变化（且不是加载页）
+        就提前放弃并存 `event_recover_stuck.png` —— 之前这种状态会静默空转
+        40 轮（当天实测约 12 分钟）才放弃，日志里只有一片空白。
+        """
+        last = None
+        same = 0
+        for i in range(rounds):
             ctx.screenshot()
             if self._is_target_stage_list(ctx):
                 return True
             if handle_download_popup(ctx) or handle_network_error(ctx) or close_content_popup(ctx):
+                last, same = None, 0
                 continue
+            if i and i % 5 == 0:
+                ctx.logger.info(f"重新进入活动页重试中（{i + 1}/{rounds}）")
+            if ctx.find("loading/loading_mark.png", threshold=0.8) is not None:
+                # 还在加载：不算“卡住”，等它
+                last, same = None, 0
+                time.sleep(2)
+                continue
+            if last is not None and _screens_same(last, ctx._last_screen):
+                same += 1
+                if same >= 8:
+                    path = ctx.save_screenshot(ctx._last_screen, "event_recover_stuck.png")
+                    ctx.logger.warn(
+                        f"重新进入活动页连续 {same} 轮画面几乎没变化，提前放弃；"
+                        f"截图已保存: {path}")
+                    return False
+            else:
+                same = 0
+            last = None if ctx._last_screen is None else ctx._last_screen.copy()
             if is_page(ctx, "home"):
                 ctx.logger.info("首页点出撃")
                 ctx.click(HOME_SORTIE[0], HOME_SORTIE[1], sleeptime=5)
@@ -882,7 +909,9 @@ class _ClearEventBase(_LegionGekihaTask):
     def _claim_event_reward(self, ctx):
         """点左栏「報酬」/「回収」把活动任务奖励领掉（尽力而为，不阻塞清关）。"""
         ctx.screenshot()
-        hit = self._find_text(ctx, ("報酬", "回収"), (0, 520, 540, 700))
+        # 「回収」会被 OCR 读成中文的「回收」（实测 2026-10-07 踏破イベント
+        # サバイバルアタック：挂着 100 个未领奖励，被这个拼写差异一直跳过）。
+        hit = self._find_text(ctx, ("報酬", "回収", "回收"), (0, 520, 540, 700))
         if hit is None:
             # 「報酬」两个字经常被 OCR 读花（实测 2026-09-20 读成「赣州」），只认文字会
             # 直接放弃 —— 那次「報酬」上挂着 42 个未领奖励，脚本连着几天都没领。用模板兜底。
@@ -1162,8 +1191,10 @@ class _ClearEventBase(_LegionGekihaTask):
         # 先看当前视野，不立刻滚到顶，避免把带红点的关滚出视野。
         processed = set()
         down_sweeps = 0
-        for _ in range(45):
+        for i in range(45):
             ctx.screenshot()
+            if i and i % 10 == 0:
+                ctx.logger.info(f"继续扫描活动关卡列表（{i}/45）")
             # 活动关卡必须一关一关按顺序打；只有“当前可打”那一关右上角带红点、
             # 且真的能点开，后面的是锁定灰卡。所以只认带红点的关卡行。
             rows = self._available_stage_rows(ctx)
@@ -1410,22 +1441,37 @@ class _ClearEventBase(_LegionGekihaTask):
                 ctx.logger.warn("未能进入ステージ情報，该关卡可能未解锁或加载异常")
                 self.enter_failed = True
                 return False
+        settled = False   # True=这一关已经打完、直接进结算处理（「次へ」直接开打时用）
         while True:
-            if not self._ap_ok(ctx):
-                # AP 不够：退出ステージ情報，停止本活动的清关
-                self._back_to_stage_list(ctx)
-                return False
-            if not self._fight_current_stage(ctx):
-                return False
+            if settled:
+                settled = False
+            else:
+                if not self._ap_ok(ctx):
+                    # AP 不够：退出ステージ情報，停止本活动的清关
+                    self._back_to_stage_list(ctx)
+                    return False
+                if not self._fight_current_stage(ctx):
+                    return False
             next_stage = self._settle_current_stage(ctx)
             if next_stage is None:
                 return self._is_target_stage_list(ctx)
             if not next_stage:
                 return True                 # 点了 OK，已经回到关卡列表
-            # 点了「次へ」：现在应该是下一关的ステージ情報，循环接着打
+            # 点了「次へ」：一般是到下一关的ステージ情報；踏破活动会直接开打。
             self.processed_count += 1
-            if not self._wait_next_stage_info(ctx):
-                ctx.logger.warn("点了「次へ」之后没等到下一关的ステージ情報，回列表")
+            state = self._wait_next_stage_info(ctx)
+            if state == "battle":
+                # 实测 2026-10-07：踏破イベント保留上次队伍，点「次へ」直接进战斗；
+                # 别再点ユニット選択，等这场结算，循环里接着走结算处理。
+                ctx.logger.info("下一关直接开打了，等它结算")
+                if not self._battle_and_clear(ctx):
+                    return False
+                settled = True
+                continue
+            if not state:
+                ctx.logger.warn("点了「次へ」之后没等到下一关（ステージ情報和战斗画面都没出现）")
+                path = ctx.save_screenshot(ctx._last_screen, "event_next_stage_stuck.png")
+                ctx.logger.info(f"已存截图：{path}")
                 return self._back_to_stage_list(ctx)
 
     def _fight_current_stage(self, ctx):
@@ -1477,11 +1523,21 @@ class _ClearEventBase(_LegionGekihaTask):
         return None
 
     def _wait_next_stage_info(self, ctx, rounds=10):
-        """点「次へ」之后等下一关的ステージ情報页。
+        """点「次へ」之后等下一关；返回 "info" / "battle" / False。
+
+        - "info"：到了下一关的ステージ情報页（普通活动都是这样）；
+        - "battle"：下一关已经**直接开打**（见下），交给上层等结算；
+        - False：都没等到。
 
         实测 2026-09-20：STAGE CLEAR 页本来就有 DROP / 初回報酬 字样，
         用 `_wait_stage_info` 会立刻在结算页上返回 True → 接着点 (1155,655)
         其实点到结算页的按钮上，把流程带偏。所以这里必须排除结算页。
+
+        实测 2026-10-07（踏破イベント「サバイバルアタック」05→06）：点「次へ」
+        后**根本不经过ステージ情報**——保留上次队伍时游戏直接开打下一关
+        （+3s 加载 → +10s 战斗开场动画 → +35s 已经在 WAVE 1/1 里）。旧代码只认
+        「消費AP」，等了 96 秒判失败 → 按 BACK 乱走 12 分钟 → 活动清关失败。
+        所以这里把“战斗已经开打”也当作成功的一种。
         """
         for _ in range(rounds):
             time.sleep(1.5)
@@ -1492,8 +1548,10 @@ class _ClearEventBase(_LegionGekihaTask):
             up = joined.upper()
             if "STAGECLEAR" in up or "CLEARBONUS" in up:
                 continue                 # 还停在结算页
-            if "消費AP" in joined or "消费AP" in joined:
-                return True
+            if "WAVE" in up or ("HOME" in up and "AUTO" in up):
+                return "battle"          # 下一关直接开打了（战斗 UI）
+            if "消費AP" in joined or "消费AP" in joined or "ステージ情報" in joined:
+                return "info"
         return False
 
     def _find_next_stage_button(self, ctx):
@@ -1875,6 +1933,16 @@ class ClearEventStory(ClearEventAll):
         super().__init__()
         self.name = "活动剧情"
         self.do_battle = False
+
+
+def _screens_same(a, b, tol=2.0):
+    """两张画面是否几乎没变化（用于“卡在认不出的画面”的提前放弃判断）。"""
+    if a is None or b is None:
+        return False
+    if getattr(a, "shape", None) != getattr(b, "shape", None):
+        return False
+    import cv2
+    return float(cv2.absdiff(a, b).mean()) <= tol
 
 
 class ClearEventStages(ClearEventAll):
