@@ -548,6 +548,56 @@ class GotoTabRecoveryTest(unittest.TestCase):
         self.assertIn("「タイトルに戻る」", ctx.logger.joined())
 
 
+class IsTargetStageListTest(unittest.TestCase):
+    """关卡列表判据：结算页不能被当成关卡列表（2026-10-09 实机踩到）。
+
+    リリィスファンタジーゼロ ステージ05 的 STAGE CLEAR 页上有 MISSION / AP /
+    「×94」这样的两位数掉落数量 —— 旧判据「关卡行数字 + MISSION/AP」直接命中，
+    把结算页当成关卡列表 → 「次へ」不点、流程跑偏、整个活动只做了 1 个。
+    """
+
+    class _C:
+        def __init__(self):
+            self._last_screen = object()
+
+        def screenshot(self):
+            return self._last_screen
+
+    def _check(self, texts):
+        task = ClearEventStages()
+        with patch("tasks.event.read_text", return_value=list(texts)):
+            return task._is_target_stage_list(self._C())
+
+    def test_stage_clear_page_is_not_stage_list(self):
+        self.assertFalse(self._check([
+            ("STAGE CLEAR", 640, 37, 0.95),
+            ("NORMAL：リリィスファンタジーゼロステージ05", 640, 71, 0.9),
+            ("MISSION", 705, 226, 0.9),
+            ("COMPLETE", 1181, 280, 0.9),
+            ("AP", 1106, 173, 0.9),
+            ("170/160", 1180, 173, 0.9),
+            ("94", 738, 489, 0.92),
+            ("次へ", 890, 658, 0.85),
+            ("OK", 1180, 658, 0.9),
+        ]))
+
+    def test_clear_bonus_page_is_not_stage_list(self):
+        self.assertFalse(self._check([
+            ("CLEAR BONUS", 640, 37, 0.95),
+            ("初回クリア報酬獲得", 640, 120, 0.9),
+            ("OK", 638, 618, 0.9),
+        ]))
+
+    def test_real_stage_list_still_detected(self):
+        self.assertTrue(self._check([
+            ("報酬受取期間：2026/10/29 22:59まで", 260, 181, 0.9),
+            ("表示切替", 120, 662, 0.95),
+            ("ステージ01", 640, 140, 0.9),
+            ("AP", 610, 203, 0.9),
+            ("MISSION", 730, 203, 0.9),
+        ]))
+
+
 class NextStageHandoffTest(unittest.TestCase):
     """点「次へ」之后的三种去向（2026-10-07 踏破イベント实机踩到）。
 

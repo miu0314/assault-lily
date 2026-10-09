@@ -348,6 +348,12 @@ class _ClearEventBase(_LegionGekihaTask):
         ctx.screenshot()
         items = read_text(ctx._last_screen)
         joined = "".join(t for t, *_ in items).replace(" ", "")
+        # 结算页（STAGE CLEAR / CLEAR BONUS）上也有 MISSION / AP / 两位数的掉落数量，
+        # 会被下面「关卡行」兜底误判成关卡列表（2026-10-09 リリィスファンタジーゼロ
+        # ステージ05：结算页被当成列表 → 「次へ」没点、整个活动只做了 1 个）。
+        flat = re.sub(r"[^A-Z0-9]", "", joined.upper())
+        if any(m in flat for m in ("STAGECLEAR", "CLEARBONUS", "BATTLEFIN")):
+            return False
         if any(k in joined for k in ("MODE:", "報酬受取期間", "EVENTMISSION",
                                      "表示切替", "部隧構成", "部隊構成")):
             return True
