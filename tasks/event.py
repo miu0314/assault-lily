@@ -1439,6 +1439,12 @@ class _ClearEventBase(_LegionGekihaTask):
         ctx.logger.info(f"点关卡行 (y={row_y})")
         ctx.click(STAGE_ROW_X, row_y, sleeptime=6)
         if not self._wait_stage_info(ctx):
+            if self.ap_blocked:
+                # AP 不足：点关卡行时就弹了「AP回復確認」（已取消）。别换坐标重点一次，
+                # 回列表后返回 False，交给上层按「AP 不足」收尾（立即停止、继续领奖、如实上报）。
+                ctx.logger.warn("点关卡时 AP 不足（已取消「AP回復確認」），停止这个活动的清关")
+                self._back_to_stage_list(ctx)
+                return False
             ctx.logger.info(f"主坐标未进入ステージ情報，改用备用坐标重试 (y={row_y})")
             # 先尝试返回（可能误点到空白），再换 x=800 点卡。
             if self._is_target_stage_list(ctx):
@@ -1477,7 +1483,8 @@ class _ClearEventBase(_LegionGekihaTask):
             if state == "ap":
                 ctx.logger.warn("下一关弹出「AP回復確認」（AP 不足），停止这个活动的清关")
                 self.ap_blocked = True
-                return self._back_to_stage_list(ctx)
+                self._back_to_stage_list(ctx)   # 先回关卡列表（接着领奖、遍历下一个活动）
+                return False                    # 交给上层：立即停止这个活动的清关、如实上报
             if not state:
                 ctx.logger.warn("点了「次へ」之后没等到下一关（ステージ情報和战斗画面都没出现）")
                 path = ctx.save_screenshot(ctx._last_screen, "event_next_stage_stuck.png")
@@ -1532,6 +1539,37 @@ class _ClearEventBase(_LegionGekihaTask):
                 return "unit"
         return None
 
+    @staticmethod
+    def _ap_charge_dialog(ctx):
+        """当前画面是不是「AP回復確認」（AP 不足，问要不要花ラムネ回复）。
+
+        实测 2026-10-09（リリィスファンタジーゼロ HARD，AP 3/160）：点「次へ」和
+        点关卡行都会弹它。OCR 稳定读出「AP回復確認」和「ラムネ」。
+        """
+        joined = "".join(t for t, *_ in read_text(ctx._last_screen)).replace(" ", "")
+        return "ラムネ" in joined or "AP回復" in joined
+
+    @classmethod
+    def _cancel_ap_dialog(cls, ctx, attempts=3):
+        """点「キャンセル」关掉「AP回復確認」，点完复查一次；绝不点 OK（会花ラムネ）。
+
+        返回最后点击的坐标（日志用）。实测按钮固定位置 (523,650)。
+        """
+        hit = (523, 650)
+        for _ in range(max(1, attempts)):
+            pos = None
+            for t, cx, cy, _s in read_text(ctx._last_screen):
+                if ("キャンセル" in t or "キヤンセル" in t or "セル" in t) \
+                        and cy > 550:
+                    pos = (cx, cy)
+                    break
+            hit = pos or (523, 650)      # 该弹窗「キャンセル」固定位置
+            ctx.click(hit[0], hit[1], sleeptime=3)
+            ctx.screenshot()
+            if not cls._ap_charge_dialog(ctx):
+                return hit
+        return hit
+
     def _wait_next_stage_info(self, ctx, rounds=10):
         """点「次へ」之后等下一关；返回 "info" / "battle" / False。
 
@@ -1560,16 +1598,13 @@ class _ClearEventBase(_LegionGekihaTask):
                 continue                 # 还停在结算页
             if "WAVE" in up or ("HOME" in up and "AUTO" in up):
                 return "battle"          # 下一关直接开打了（战斗 UI）
-            if "ラムネ" in joined or "AP回復" in joined:
+            if self._ap_charge_dialog(ctx):
                 # AP 不足时点「次へ」会弹「AP回復確認」（花ラムネ回复 AP）。
                 # 不花道具：点「キャンセル」关掉，按 AP 不足处理（2026-10-09 实机踩到）。
-                for t, cx, cy, s in read_text(ctx._last_screen):
-                    if ("キャンセル" in t or "キヤンセル" in t or "セル" in t) \
-                            and cy > 550:
-                        ctx.click(cx, cy, sleeptime=3)
-                        break
-                else:
-                    ctx.click(523, 650, sleeptime=3)   # 该弹窗「キャンセル」固定位置
+                pos = self._cancel_ap_dialog(ctx)
+                ctx.logger.warn(
+                    f"点「次へ」弹出「AP回復確認」（AP 不足），已点「キャンセル」"
+                    f"({pos[0]},{pos[1]})，停止这个活动的清关")
                 return "ap"
             if "消費AP" in joined or "消费AP" in joined or "ステージ情報" in joined:
                 return "info"
@@ -1627,6 +1662,16 @@ class _ClearEventBase(_LegionGekihaTask):
                 continue
             if _handle_download(ctx):
                 continue
+            if self._ap_charge_dialog(ctx):
+                # AP 不足时点关卡行同样会弹「AP回復確認」。2026-10-09 实机：没取消它 →
+                # 空转 15 轮判「进不去关卡」→ 弹窗留在屏幕上约 10 分钟，后面的活动遍历、
+                # 领奖全跑偏（20:47 的现场截图就是它）。
+                pos = self._cancel_ap_dialog(ctx)
+                ctx.logger.warn(
+                    f"点关卡弹出「AP回復確認」（AP 不足），已点「キャンセル」"
+                    f"({pos[0]},{pos[1]})，停止这个活动的清关")
+                self.ap_blocked = True
+                return False
             joined = "".join(t for t, *_ in read_text(ctx._last_screen))
             if any(k in joined for k in ("BOSS", "DROP", "初回報酬", "消費AP")):
                 return True

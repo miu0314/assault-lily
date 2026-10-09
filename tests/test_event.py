@@ -632,7 +632,12 @@ class ApDialogTest(unittest.TestCase):
     def _wait(self, texts):
         task = ClearEventStages()
         ctx = self._C()
-        with patch("tasks.event.read_text", return_value=list(texts)), \
+
+        def _read(_screen):
+            # 点掉「キャンセル」之后弹窗就没了（真机也是这样）
+            return [] if ctx.clicks else list(texts)
+
+        with patch("tasks.event.read_text", side_effect=_read), \
                 patch("tasks.event.handle_network_error", return_value=False), \
                 patch("tasks.event._handle_download", return_value=False), \
                 patch("tasks.event.time.sleep"):
@@ -658,12 +663,68 @@ class ApDialogTest(unittest.TestCase):
         task._fight_current_stage = fight_once
         task._settle_current_stage = lambda c: True
         task._wait_next_stage_info = lambda c, rounds=10: "ap"
-        task._back_to_stage_list = lambda c: True
+        backs = {"n": 0}
+
+        def back(c):
+            backs["n"] += 1
+            return True
+
+        task._back_to_stage_list = back
         ctx = self._C()
         with patch("tasks.event.time.sleep"):
             ok = task._clear_one_stage(ctx, 300)
-        self.assertTrue(ok)
+        self.assertFalse(ok)                                 # 让上层按「AP 不足」收尾
+        self.assertEqual(backs["n"], 1)                      # 先回关卡列表
         self.assertTrue(task.ap_blocked)                     # 交给上层当「AP 不足」处理
+        self.assertIn("AP", ctx.logger.joined())
+
+    def test_stage_row_ap_dialog_cancels_and_flags(self):
+        """点关卡行同样会弹「AP回復確認」（2026-10-09 20:37 实机踩到）：取消 + 按 AP 不足处理。
+
+        当时没处理它：空转 15 轮判「进不去关卡」→ 弹窗在屏幕上留了约 10 分钟 →
+        后面的活动遍历、领奖全跑偏（20:47 的现场截图就是它）。
+        """
+        task = ClearEventStages()
+        ctx = self._C()
+
+        def _read(_screen):
+            return [] if ctx.clicks else list(self._AP_DIALOG)
+
+        with patch("tasks.event.read_text", side_effect=_read), \
+                patch("tasks.event.handle_network_error", return_value=False), \
+                patch("tasks.event._handle_download", return_value=False), \
+                patch("tasks.event.time.sleep"):
+            ok = task._wait_stage_info(ctx)
+        self.assertFalse(ok)
+        self.assertEqual(ctx.clicks, [(523, 650)])           # 只点「キャンセル」，没点 OK
+        self.assertTrue(task.ap_blocked)
+        self.assertIn("AP", ctx.logger.joined())
+
+    def test_clear_one_stage_row_click_ap_dialog_no_retry(self):
+        """点关卡行弹 AP 弹窗时：不换备用坐标重点，回列表后交给上层按 AP 不足收尾。"""
+        task = ClearEventStages()
+        task.processed_count = 0
+        backs = {"n": 0}
+
+        def back(c):
+            backs["n"] += 1
+            return True
+
+        task._back_to_stage_list = back
+
+        def row_ap(c, rounds=15):
+            task.ap_blocked = True
+            return False
+
+        task._wait_stage_info = row_ap
+        ctx = self._C()
+        with patch("tasks.event.time.sleep"):
+            ok = task._clear_one_stage(ctx, 300)
+        self.assertFalse(ok)                                 # 让上层按「AP 不足」收尾
+        self.assertEqual(backs["n"], 1)                      # 先回关卡列表
+        self.assertTrue(task.ap_blocked)
+        self.assertEqual(ctx.clicks, [(890, 300)])           # 没有备用坐标那次重试
+        self.assertFalse(task.enter_failed)
         self.assertIn("AP", ctx.logger.joined())
 
 
