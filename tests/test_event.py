@@ -598,6 +598,75 @@ class IsTargetStageListTest(unittest.TestCase):
         ]))
 
 
+class ApDialogTest(unittest.TestCase):
+    """点「次へ」时 AP 不足会弹「AP回復確認」：必须点取消并当作 AP 不足停下。
+
+    实测 2026-10-09（リリィスファンタジーゼロ HARD）：AP 只剩 3/160 时点
+    「次へ」，游戏弹「AP回復確認」（花ラムネ回复 AP）——旧代码不认识它，
+    等 96 秒判失败退回列表，后面整轮流程跑偏、连 5 个报酬都没领到。
+    """
+
+    class _C:
+        def __init__(self):
+            self.logger = _Logger()
+            self._last_screen = object()
+            self.clicks = []
+
+        def screenshot(self):
+            return self._last_screen
+
+        def click(self, x, y, sleeptime=1.0):
+            self.clicks.append((x, y))
+
+    _AP_DIALOG = [
+        ("AP回復確認", 250, 47, 0.95),
+        ("使用するラムネの個数を選択してください。", 640, 147, 0.9),
+        ("ラムネ", 500, 271, 0.9),
+        ("2,118", 470, 536, 0.9),
+        ("AP", 700, 537, 0.9),
+        ("3/160", 900, 537, 0.9),
+        ("キャンセル", 523, 650, 0.9),
+        ("OK", 758, 650, 0.9),
+    ]
+
+    def _wait(self, texts):
+        task = ClearEventStages()
+        ctx = self._C()
+        with patch("tasks.event.read_text", return_value=list(texts)), \
+                patch("tasks.event.handle_network_error", return_value=False), \
+                patch("tasks.event._handle_download", return_value=False), \
+                patch("tasks.event.time.sleep"):
+            state = task._wait_next_stage_info(ctx)
+        return state, ctx
+
+    def test_ap_dialog_returns_ap_and_clicks_cancel(self):
+        state, ctx = self._wait(self._AP_DIALOG)
+        self.assertEqual(state, "ap")
+        self.assertEqual(ctx.clicks, [(523, 650)])          # 点的是「キャンセル」，不是 OK
+
+    def test_clear_one_stage_stops_on_ap_dialog(self):
+        task = ClearEventStages()
+        task.processed_count = 0
+        task._wait_stage_info = lambda c, rounds=15: True
+        task._ap_ok = lambda c: True
+        fights = {"n": 0}
+
+        def fight_once(c):
+            fights["n"] += 1
+            return fights["n"] == 1
+
+        task._fight_current_stage = fight_once
+        task._settle_current_stage = lambda c: True
+        task._wait_next_stage_info = lambda c, rounds=10: "ap"
+        task._back_to_stage_list = lambda c: True
+        ctx = self._C()
+        with patch("tasks.event.time.sleep"):
+            ok = task._clear_one_stage(ctx, 300)
+        self.assertTrue(ok)
+        self.assertTrue(task.ap_blocked)                     # 交给上层当「AP 不足」处理
+        self.assertIn("AP", ctx.logger.joined())
+
+
 class NextStageHandoffTest(unittest.TestCase):
     """点「次へ」之后的三种去向（2026-10-07 踏破イベント实机踩到）。
 

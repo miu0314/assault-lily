@@ -1474,6 +1474,10 @@ class _ClearEventBase(_LegionGekihaTask):
                     return False
                 settled = True
                 continue
+            if state == "ap":
+                ctx.logger.warn("下一关弹出「AP回復確認」（AP 不足），停止这个活动的清关")
+                self.ap_blocked = True
+                return self._back_to_stage_list(ctx)
             if not state:
                 ctx.logger.warn("点了「次へ」之后没等到下一关（ステージ情報和战斗画面都没出现）")
                 path = ctx.save_screenshot(ctx._last_screen, "event_next_stage_stuck.png")
@@ -1556,6 +1560,17 @@ class _ClearEventBase(_LegionGekihaTask):
                 continue                 # 还停在结算页
             if "WAVE" in up or ("HOME" in up and "AUTO" in up):
                 return "battle"          # 下一关直接开打了（战斗 UI）
+            if "ラムネ" in joined or "AP回復" in joined:
+                # AP 不足时点「次へ」会弹「AP回復確認」（花ラムネ回复 AP）。
+                # 不花道具：点「キャンセル」关掉，按 AP 不足处理（2026-10-09 实机踩到）。
+                for t, cx, cy, s in read_text(ctx._last_screen):
+                    if ("キャンセル" in t or "キヤンセル" in t or "セル" in t) \
+                            and cy > 550:
+                        ctx.click(cx, cy, sleeptime=3)
+                        break
+                else:
+                    ctx.click(523, 650, sleeptime=3)   # 该弹窗「キャンセル」固定位置
+                return "ap"
             if "消費AP" in joined or "消费AP" in joined or "ステージ情報" in joined:
                 return "info"
         return False
